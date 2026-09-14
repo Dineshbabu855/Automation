@@ -67,8 +67,13 @@ def _validate_scoping_for_multi_doctype(graph_json, triggers):
         return
 
     # Determine distinct trigger doctypes
+    # Exclude Schedule triggers — they run on a timer with doc=None and don't
+    # produce a triggering document, so they don't create ambiguity.
     doctypes = set()
     for t in triggers:
+        tt = t.get("trigger_type", "DocType Event") if isinstance(t, dict) else getattr(t, "trigger_type", "DocType Event")
+        if tt == "Schedule":
+            continue
         dt = t.get("trigger_doctype") if isinstance(t, dict) else getattr(t, "trigger_doctype", None)
         if dt:
             doctypes.add(dt)

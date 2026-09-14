@@ -283,6 +283,13 @@ def execute_automation(automation_name, ref_doctype, ref_name):
         # In cross-doctype automations, this tells actions which doctype triggered this run
         context["trigger_doctype"] = ref_doctype
 
+        # Find the firing trigger row for tagged-edge routing
+        # Match ref_doctype against the automation's trigger rows
+        for t in automation.triggers:
+            if t.trigger_doctype == ref_doctype:
+                context["firing_trigger_name"] = t.name
+                break
+
         # Find the first trigger node dynamically (supports multiple triggers)
         trigger_nodes = [n for n in graph.get("nodes", []) if n.get("type") == "trigger"]
         start_id = trigger_nodes[0]["id"] if trigger_nodes else "trigger"
@@ -447,20 +454,25 @@ def _walk_graph(graph, start_id, context=None):
     every node — used for UI layout or when branching evaluation is not needed.
     When context is provided (execution walk), branching nodes are evaluated and
     only the matching branch is followed.
+
+    When the Trigger node has multiple outgoing edges, only follow edges whose
+    ``applies_to_triggers`` list includes the firing trigger row's identifier,
+    or edges with ``applies_to_triggers`` = null/empty (meaning "All").
+    The firing trigger row identifier is looked up from context["firing_trigger_name"].
     """
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
 
     nodes_map = {n["id"]: n for n in nodes}
 
-    # Build edge map: source_id -> [(sourceHandle, target_id), ...]
+    # Build edge map: source_id -> [(sourceHandle, target_id, edge_data), ...]
     edge_map = {}
     for e in edges:
         src = e.get("source")
         tgt = e.get("target")
         sh = e.get("sourceHandle", "")
         if src and tgt:
-            edge_map.setdefault(src, []).append((sh, tgt))
+            edge_map.setdefault(src, []).append((sh, tgt, e))
 
     trace = []
     seen = set()
@@ -477,6 +489,32 @@ def _walk_graph(graph, start_id, context=None):
             if node_type == "action" and node.get("data", {}).get("action_type"):
                 trace.append({"type": "action", "node_id": current_id})
             break
+
+        # Trigger node routing: if outgoing edges have applies_to_triggers, filter
+        if node_type == "trigger" and context and outgoing:
+            firing_trigger = context.get("firing_trigger_name", "")
+            has_any_tags = any(
+                (e_data.get("applies_to_triggers") or [])
+                for _sh, _tgt, e_data in outgoing
+            )
+            if has_any_tags:
+                filtered = []
+                for sh, tgt, e_data in outgoing:
+                    applies = e_data.get("applies_to_triggers") or []
+                    # null/empty means "All" — always included
+                    if not applies or (firing_trigger and firing_trigger in applies):
+                        filtered.append((sh, tgt, e_data))
+                if not filtered:
+                    # No matching edge — dead end for this trigger row
+                    trace.append({
+                        "type": "branch",
+                        "node_id": current_id,
+                        "node_type": "trigger",
+                        "branch_taken": "skipped",
+                        "output": f"No downstream path applies to trigger row '{firing_trigger}'",
+                    })
+                    break
+                outgoing = filtered
 
         if context and node_type in ("if", "switch"):
             # Doctype scoping: if the branching node is scoped to a specific
@@ -507,7 +545,7 @@ def _walk_graph(graph, start_id, context=None):
             })
             # Follow only the matching edge
             next_id = None
-            for sh, tgt in outgoing:
+            for sh, tgt, _e_data in outgoing:
                 if sh == source_handle:
                     next_id = tgt
                     break

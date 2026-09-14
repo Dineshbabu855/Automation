@@ -61,38 +61,40 @@ _PSEUDO_FIELD = "__trigger_doctype__"
 def _validate_scoping_for_multi_doctype(graph_json, triggers):
     """Reject automations where field-reading nodes lack explicit scoping.
 
-    When an automation has 2+ distinct trigger doctypes, every node that
-    reads trigger-document fields (actions with trigger_doctype_select in
-    their config, condition/IF/Switch nodes checking a real field) MUST
-    have explicit scoping set. Otherwise the node silently evaluates
-    against the wrong document at runtime.
+    Uses reachability analysis: for each field-reading node, compute which
+    trigger rows can actually reach it through the graph. If all reachable
+    trigger rows share the SAME doctype (or only one trigger row reaches it),
+    no explicit scoping is required — the doctype can be inferred automatically.
+
+    Only rejects when a node is reachable from trigger rows spanning MORE than
+    one distinct doctype (a genuine convergence point) AND lacks explicit
+    trigger_doctype_select.
 
     Called from save_automation BEFORE persisting. Raises frappe.ValidationError
-    if any node is unscoped in a multi-doctype context.
+    if any unscoped node is genuinely ambiguous.
     """
     if not graph_json or not triggers:
         return
 
-    # Determine distinct trigger doctypes
-    # Exclude Schedule triggers — they run on a timer with doc=None and don't
-    # produce a triggering document, so they don't create ambiguity.
-    # Webhook triggers add a synthetic "__webhook__" source — mixing a real
-    # DocType Event trigger with a Webhook trigger requires explicit scoping.
+    # Build trigger row map: row_index -> doctype
+    # Trigger rows don't carry an explicit "name" key in the dicts passed from
+    # save_automation. We key by their index in the triggers list and match them
+    # to Trigger nodes in the graph by doctype.
     _WEBHOOK_DOCTYPE = "__webhook__"
-    doctypes = set()
-    for t in triggers:
+    trigger_rows = {}  # row_index -> doctype
+    for idx, t in enumerate(triggers):
         tt = t.get("trigger_type", "DocType Event") if isinstance(t, dict) else getattr(t, "trigger_type", "DocType Event")
         if tt == "Schedule":
             continue
         if tt == "Webhook":
-            doctypes.add(_WEBHOOK_DOCTYPE)
+            trigger_rows[idx] = _WEBHOOK_DOCTYPE
             continue
         dt = t.get("trigger_doctype") if isinstance(t, dict) else getattr(t, "trigger_doctype", None)
         if dt:
-            doctypes.add(dt)
+            trigger_rows[idx] = dt
 
-    if len(doctypes) <= 1:
-        return  # No ambiguity — scoping is optional
+    if len(trigger_rows) <= 1:
+        return  # Single trigger row — no ambiguity possible
 
     try:
         graph = json.loads(graph_json) if isinstance(graph_json, str) else graph_json
@@ -100,46 +102,134 @@ def _validate_scoping_for_multi_doctype(graph_json, triggers):
         return  # Can't parse — skip validation (will fail at execution)
 
     nodes = graph.get("nodes", [])
+    edges = graph.get("edges", [])
 
+    # Build adjacency list (forward)
+    forward = {}  # node_id -> [target_id, ...]
+    for e in edges:
+        src = e.get("source")
+        tgt = e.get("target")
+        if src and tgt:
+            forward.setdefault(src, []).append(tgt)
+
+    # Build edge data map for trigger-row filtering
+    # source_id -> {target_id: edge_data}
+    edge_data_map = {}
+    for e in edges:
+        src = e.get("source")
+        tgt = e.get("target")
+        if src and tgt:
+            edge_data_map.setdefault(src, {})[tgt] = e
+
+    # For each trigger row index, compute the set of nodes reachable via forward walk.
+    # We match trigger row indices to Trigger nodes in the graph by doctype.
+    # Multiple trigger rows with the same doctype share the same Trigger node in the graph.
+    trigger_nodes = [n for n in nodes if n.get("type") == "trigger"]
+
+    # Build a mapping from trigger_node_id -> list of trigger_row_indices
+    node_to_trigger_indices = {}
+    for tn in trigger_nodes:
+        tn_data = tn.get("data", {})
+        tn_doctype = tn_data.get("trigger_doctype", "")
+        for idx, dt in trigger_rows.items():
+            if not tn_doctype:
+                # Empty doctype ("Any") means this trigger node fires for ALL rows
+                node_to_trigger_indices.setdefault(tn["id"], []).append(idx)
+            elif dt == tn_doctype or (not tn_doctype and dt == _WEBHOOK_DOCTYPE):
+                node_to_trigger_indices.setdefault(tn["id"], []).append(idx)
+
+    trigger_reachability = {}  # trigger_row_index -> set of reachable node_ids
+
+    for idx in trigger_rows:
+        reachable = set()
+        # Find which trigger node(s) in the graph this row maps to
+        queue = []
+        for tn in trigger_nodes:
+            if idx in node_to_trigger_indices.get(tn["id"], []):
+                queue.append(tn["id"])
+
+        while queue:
+            nid = queue.pop(0)
+            if nid in reachable:
+                continue
+            reachable.add(nid)
+            targets = forward.get(nid, [])
+            for tgt in targets:
+                edge = edge_data_map.get(nid, {}).get(tgt, {})
+                applies = edge.get("applies_to_triggers") or []
+                # null/empty means "All" — always included
+                if not applies or idx in applies:
+                    queue.append(tgt)
+
+        trigger_reachability[idx] = reachable
+
+    # For each field-reading node, compute which trigger rows can reach it
     unscoped = []
+    nodes_map = {n["id"]: n for n in nodes}
+
     for node in nodes:
         node_type = node.get("type")
         node_data = node.get("data", {})
         node_id = node.get("id", "unknown")
 
+        # Determine if this is a field-reading node that could need scoping
+        needs_scoping_check = False
+        field_checked = ""
         if node_type == "action":
             action_type = node_data.get("action_type", "")
-            if action_type not in _SCOPABLE_NODE_TYPES:
-                continue
-            scoped = node_data.get("trigger_doctype_select", "")
-            if not scoped:
-                unscoped.append(f"Action node '{action_type}' ({node_id})")
-
+            if action_type in _SCOPABLE_NODE_TYPES:
+                needs_scoping_check = True
+                field_checked = action_type
         elif node_type == "condition":
             field = node_data.get("condition_field", "")
             if field and field != _PSEUDO_FIELD:
-                scoped = node_data.get("trigger_doctype_select", "")
-                if not scoped:
-                    unscoped.append(f"Condition node ({node_id}) checking '{field}'")
-
+                needs_scoping_check = True
+                field_checked = field
         elif node_type in ("if", "switch"):
             field = node_data.get("field_to_check", "")
             if field and field != _PSEUDO_FIELD:
-                # IF/Switch reference a real field — needs scoping
-                # (the __trigger_doctype__ pseudo-field is always safe)
-                scoped = node_data.get("trigger_doctype_select", "")
-                if not scoped:
-                    label = "IF" if node_type == "if" else "Switch"
-                    unscoped.append(f"{label} node ({node_id}) checking '{field}'")
+                needs_scoping_check = True
+                field_checked = field
+
+        if not needs_scoping_check:
+            continue
+
+        # Already has explicit scoping — skip
+        scoped = node_data.get("trigger_doctype_select", "")
+        if scoped:
+            continue
+
+        # Find which trigger row indices can reach this node
+        reachable_doctypes = set()
+        for idx, reachable_nodes in trigger_reachability.items():
+            if node_id in reachable_nodes:
+                dt = trigger_rows.get(idx, "")
+                if dt:
+                    reachable_doctypes.add(dt)
+
+        # If 0 or 1 distinct doctypes can reach this node — no ambiguity
+        if len(reachable_doctypes) <= 1:
+            continue
+
+        # Genuine convergence: multiple doctypes can reach this unscoped node
+        if node_type == "action":
+            unscoped.append(f"Action node '{node_data.get('action_type', '')}' ({node_id})")
+        elif node_type == "condition":
+            unscoped.append(f"Condition node ({node_id}) checking '{field_checked}'")
+        elif node_type in ("if", "switch"):
+            label = "IF" if node_type == "if" else "Switch"
+            unscoped.append(f"{label} node ({node_id}) checking '{field_checked}'")
 
     if unscoped:
         names = "; ".join(unscoped)
+        all_doctypes = sorted(set(trigger_rows.values()))
         frappe.throw(
             _("This automation has multiple trigger DocTypes ({0}). "
-              "The following nodes read trigger fields but have no explicit "
-              "DocType scope: {1}. Please set 'Trigger DocType' on each "
-              "node to a specific DocType, or select 'Any'.")
-            .format(", ".join(sorted(doctypes)), names)
+              "The following nodes are reachable from more than one DocType "
+              "but have no explicit DocType scope: {1}. Please set "
+              "'Trigger DocType' on each node to a specific DocType, or "
+              "select 'Any'.")
+            .format(", ".join(all_doctypes), names)
         )
 
 

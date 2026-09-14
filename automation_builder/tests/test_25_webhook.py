@@ -132,10 +132,27 @@ class TestStage25Scoping(IntegrationTestCase):
         ])
 
     def test_webhook_plus_doctype_event_rejected(self):
-        """Webhook + DocType Event = 2 distinct sources → rejected."""
+        """Webhook + DocType Event = 2 distinct sources → rejected only if node is reachable."""
+        # No trigger node in graph → action is unreachable → no ambiguity
+        _validate_scoping_for_multi_doctype(json.dumps({
+            "nodes": [{"id": "a1", "type": "action", "data": {"action_type": "send_email", "trigger_doctype_select": ""}}]
+        }), [
+            {"trigger_type": "Webhook", "trigger_doctype": ""},
+            {"trigger_type": "DocType Event", "trigger_doctype": "Lead"},
+        ])
+
+        # With trigger nodes + edges → action IS reachable from both → rejected
         try:
             _validate_scoping_for_multi_doctype(json.dumps({
-                "nodes": [{"id": "a1", "type": "action", "data": {"action_type": "send_email", "trigger_doctype_select": ""}}]
+                "nodes": [
+                    {"id": "t1", "type": "trigger", "position": {"x": 0, "y": 0}, "data": {"trigger_doctype": ""}},
+                    {"id": "t2", "type": "trigger", "position": {"x": 300, "y": 0}, "data": {"trigger_doctype": "Lead"}},
+                    {"id": "a1", "type": "action", "position": {"x": 150, "y": 100}, "data": {"action_type": "send_email", "trigger_doctype_select": ""}},
+                ],
+                "edges": [
+                    {"source": "t1", "target": "a1"},
+                    {"source": "t2", "target": "a1"},
+                ],
             }), [
                 {"trigger_type": "Webhook", "trigger_doctype": ""},
                 {"trigger_type": "DocType Event", "trigger_doctype": "Lead"},
@@ -154,10 +171,27 @@ class TestStage25Scoping(IntegrationTestCase):
         ])
 
     def test_webhook_plus_manual_rejected(self):
-        """Webhook + Manual (different source) = 2 distinct → rejected."""
+        """Webhook + Manual (different source) = 2 distinct → rejected only if reachable."""
+        # No trigger node in graph → unreachable → no ambiguity
+        _validate_scoping_for_multi_doctype(json.dumps({
+            "nodes": [{"id": "a1", "type": "action", "data": {"action_type": "send_email", "trigger_doctype_select": ""}}]
+        }), [
+            {"trigger_type": "Webhook", "trigger_doctype": ""},
+            {"trigger_type": "Manual", "trigger_doctype": "ToDo"},
+        ])
+
+        # With trigger nodes + edge → reachable from both → rejected
         try:
             _validate_scoping_for_multi_doctype(json.dumps({
-                "nodes": [{"id": "a1", "type": "action", "data": {"action_type": "send_email", "trigger_doctype_select": ""}}]
+                "nodes": [
+                    {"id": "t1", "type": "trigger", "position": {"x": 0, "y": 0}, "data": {"trigger_doctype": ""}},
+                    {"id": "t2", "type": "trigger", "position": {"x": 300, "y": 0}, "data": {"trigger_doctype": "ToDo"}},
+                    {"id": "a1", "type": "action", "position": {"x": 150, "y": 100}, "data": {"action_type": "send_email", "trigger_doctype_select": ""}},
+                ],
+                "edges": [
+                    {"source": "t1", "target": "a1"},
+                    {"source": "t2", "target": "a1"},
+                ],
             }), [
                 {"trigger_type": "Webhook", "trigger_doctype": ""},
                 {"trigger_type": "Manual", "trigger_doctype": "ToDo"},

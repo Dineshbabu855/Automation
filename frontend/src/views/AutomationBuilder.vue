@@ -647,9 +647,13 @@ function isValidConnection(params) {
   if (targetNode && targetNode.type === 'trigger') return false
   if (source === 'add-trigger') return false
 
-  // Linear-only: reject if source handle already has an outgoing edge
-  if (sourceHandle && connectedSourceHandles.value.has(`${source}:${sourceHandle}`)) {
-    return false
+  // Linear-only for non-trigger nodes: reject if source handle already has an outgoing edge
+  // Trigger node is ALLOWED multiple outgoing edges (for tagged-edge routing)
+  const sourceNode = nodes.value.find(n => n.id === source)
+  if (sourceNode && sourceNode.type !== 'trigger') {
+    if (sourceHandle && connectedSourceHandles.value.has(`${source}:${sourceHandle}`)) {
+      return false
+    }
   }
 
   const existingTarget = edges.value.find(e => e.target === target && e.targetHandle === targetHandle)
@@ -659,6 +663,21 @@ function isValidConnection(params) {
 
 function onConnect(params) {
   if (!isValidConnection(params)) return
+
+  // Check if this is a second outgoing edge from Trigger node
+  const sourceNode = nodes.value.find(n => n.id === params.source)
+  const triggerRows = nodes.value.filter(n => n.type === 'trigger')
+  const existingTriggerEdges = edges.value.filter(e => e.source === params.source)
+
+  let appliesToTriggers = null // null = "All" (default, backward-compatible)
+
+  if (sourceNode && sourceNode.type === 'trigger' && existingTriggerEdges.length > 0) {
+    // Second+ outgoing edge from Trigger — show picker
+    // For now, default to "All" and let user configure in ConfigPanel
+    // The picker is shown via edgeConfigNodeId
+    appliesToTriggers = null // "All" — user can customize later
+  }
+
   const newEdge = {
     id: `e-${params.source}-${params.target}-${Date.now()}`,
     source: params.source,
@@ -667,6 +686,7 @@ function onConnect(params) {
     targetHandle: params.targetHandle,
     type: 'smoothstep',
     markerEnd: { type: 'arrowclosed', color: 'var(--gray-400)' },
+    applies_to_triggers: appliesToTriggers,
   }
   edges.value.push(newEdge)
 }
@@ -731,6 +751,14 @@ function createNodeAndConnect(nodeType, actionType, sourceNodeId, sourceHandleId
   if (sourceNodeId) {
     const sourceNode = nodes.value.find(n => n.id === sourceNodeId)
     if (sourceNode) {
+      // Determine applies_to_triggers for Trigger node edges
+      let appliesToTriggers = null
+      if (sourceNode.type === 'trigger') {
+        const existingTriggerEdges = edges.value.filter(e => e.source === sourceNodeId)
+        if (existingTriggerEdges.length > 0) {
+          appliesToTriggers = null // "All" default for second+ edge
+        }
+      }
       edges.value.push({
         id: `e-${sourceNodeId}-${newNodeId}`,
         source: sourceNodeId,
@@ -739,6 +767,7 @@ function createNodeAndConnect(nodeType, actionType, sourceNodeId, sourceHandleId
         targetHandle: `${newNodeId}-in`,
         type: 'smoothstep',
         markerEnd: { type: 'arrowclosed', color: 'var(--gray-400)' },
+        applies_to_triggers: appliesToTriggers,
       })
     }
   }

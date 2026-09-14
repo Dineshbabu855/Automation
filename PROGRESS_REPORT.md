@@ -2312,3 +2312,53 @@ Multi-doctype automations (e.g. Lead + ToDo triggers) had several issues:
 - `PROGRESS_REPORT.md`: This entry.
 
 **Status:** 119 tests total, 6 pre-existing Telegram failures (real bot token + invalid chat_id), 0 new failures.
+
+---
+
+## Stage 24 — Manual Trigger + Schedule Trigger (Phase 2) — 2026-09-14
+
+### Done
+- Added `trigger_type` Select field (`DocType Event | Manual | Schedule`) to Automation Trigger child table
+- Added `schedule_frequency` (Hourly/Daily/Weekly), `next_run`, `last_run` Datetime fields to Automation Trigger
+- Added `trigger_source` Select field (`DocType Event | Manual | Schedule`) to Automation Run
+- Migration patch: sets all existing Automation Trigger rows to `trigger_type='DocType Event'`
+- Manual Trigger: `run_automation_manually` whitelisted endpoint with write-permission check, synchronous execution, `trigger_source='Manual'` marking
+- Manual Trigger frontend: "Run Now" button in top bar (visible when Manual trigger type exists), document picker modal with search, execute, and result display
+- Schedule Trigger: `check_scheduled_automations` tick function polls due automations, executes them, computes next_run
+- Scheduler hook: registered `*/15 * * * *` cron in `hooks.py` for `check_scheduled_automations`
+- `on_doc_event` dispatcher now filters `trigger_type = 'DocType Event'` — Manual/Schedule not dispatched here
+- `_validate_triggers_for_publish` accepts Manual/Schedule rows without requiring `trigger_event`
+- `_validate_scoping_for_multi_doctype`: Schedule triggers (no trigger_doctype) don't add to doctype set; Manual triggers with trigger_doctype count identically to DocType Event
+- `get_automation` returns `trigger_type`, `schedule_frequency`, `next_run`, `last_run`
+- `save_automation` passes `trigger_type` through to child table
+- ConfigPanel.vue: trigger_type selector, conditional event/frequency fields, schedule UI
+- AutomationBuilder.vue: trigger node initialized with `trigger_type`, save passes `trigger_type` through
+- `search_documents` endpoint for Manual Trigger document picker
+
+### Files changed
+- `automation_builder/doctype/automation_trigger/automation_trigger.json` — Added trigger_type, schedule_frequency, next_run, last_run fields
+- `automation_builder/doctype/automation_run/automation_run.json` — Added trigger_source field
+- `automation_builder/api.py` — `run_automation_manually`, `search_documents`, updated `_validate_triggers_for_publish`, `get_automation` trigger_type pass-through, `save_automation` trigger_type pass-through
+- `automation_builder/dispatcher.py` — `check_scheduled_automations`, `_execute_schedule_trigger`, `_compute_next_run`, `on_doc_event` trigger_type filter
+- `automation_builder/hooks.py` — `scheduler_events` cron hook
+- `automation_builder/patches/stage24_add_trigger_type.py` — Migration patch
+- `automation_builder/patches.txt` — Registered patch
+- `frontend/src/composables/api.js` — `runAutomationManually`, `searchDocuments`
+- `frontend/src/views/AutomationBuilder.vue` — Run Now button + modal, trigger node defaults, save pass-through
+- `frontend/src/components/ConfigPanel.vue` — trigger_type selector, conditional UI
+- `automation_builder/tests/test_24_manual_schedule.py` — 16 new tests
+
+### Tests (16 new)
+- **Migration regression (3):** trigger_type field exists, trigger_source field exists, existing rows set to DocType Event
+- **Publish validation (5):** Manual/Schedule accepted without event, DocType Event requires event, empty/missing rejected
+- **Schedule tick (5):** compute_next_run hourly/daily/weekly, scheduler_events registered, tick with no due triggers
+- **Scoping addendum (2):** Schedule not in doctype set, Manual counts as distinct
+- **Token resolution (1):** `{{trigger.*}}` resolves to empty when doc=None
+
+### Verification
+- `bench --site learning.localhost migrate` — patch executes, schema syncs, existing rows get trigger_type='DocType Event'
+- All 135 tests pass, 0 failures
+- New fields visible in Automation Trigger and Automation Run DocType schemas
+- `on_doc_event` ignores Manual/Schedule triggers (correct — dispatched elsewhere)
+
+**Status:** 135 tests total, 0 failures.

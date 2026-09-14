@@ -2379,3 +2379,66 @@ Created `TEST-Stage24-Schedule-Future` with `next_run=2026-09-15 06:04:24` (24 h
 **No browser click-through was performed.** This environment has no display server. The Run Now modal (document picker + execute button + result display) and the Schedule frequency selector in ConfigPanel.vue were NOT visually tested in a browser. They were verified structurally: the Vue template renders correctly (conditional `v-if="local.trigger_type === 'Manual'"` / `v-if="local.trigger_type === 'Schedule'"`), the `runAutomationManually` and `searchDocuments` API functions were confirmed callable, and the save/load roundtrip preserves `trigger_type` and `schedule_frequency` fields.
 
 **Status:** 135 tests total, 0 failures.
+
+---
+
+## Stage 25 — Webhook Trigger — 2026-09-14
+
+### Schema + token generation/regeneration
+- Added `Webhook` option to `trigger_type` Select field on Automation Trigger (now: DocType Event, Manual, Schedule, Webhook)
+- Added `webhook_token` field (Data, hidden, read_only, unique, 40-char hash) — auto-generated on creation via `Automation.validate()`
+- Added `webhook_url_display` field (Data, read_only, depends_on Webhook type) — read-only URL shown in ConfigPanel
+- Made `trigger_doctype` conditional (`mandatory_depends_on: "eval:doc.trigger_type !== 'Webhook'"`) — Webhook triggers don't need a doctype
+- Made `trigger_event` conditional (`mandatory_depends_on: "eval:doc.trigger_type === 'DocType Event'"`) — only DocType Event needs event
+- Added `Webhook` to `trigger_source` Select on Automation Run
+- Added `regenerate_webhook_token` whitelisted endpoint — generates new token via `frappe.generate_hash(length=40)`, old token immediately invalidated (no grace period)
+
+### Public endpoint: auth, rate limiting, size limits, timing-safe comparison
+- **URL design:** Query parameter `?token=<hex>` on `/api/method/automation_builder.api.webhook_trigger` — chosen over path segment because Frappe's routing doesn't support path-based parameter extraction for whitelisted methods without custom hooks; query params are simpler and work with Frappe's built-in rate limiting
+- **Authentication:** Guest-whitelisted (`allow_guest=True`), no login required
+- **Timing-safe comparison:** `hmac.compare_digest(stored_token, token)` — confirmed via code inspection (unit test `test_webhook_uses_hmac_compare_digest`)
+- **Generic rejection:** `_webhook_reject()` returns 404 with `{"status": "not_found"}` for all failure modes (missing token, invalid token, Draft automation, disabled automation) — no distinguishing error detail to prevent token enumeration
+- **Rate limiting:** 30 requests per minute per IP, implemented via `frappe.cache.incrby` with 60-second TTL (same mechanism as Frappe's built-in `rate_limiter`)
+- **Body size limit:** 100 KB (`_WEBHOOK_MAX_BODY_BYTES = 102400`), checked via `frappe.request.content_length` before JSON parsing
+- **Enqueued execution:** `frappe.enqueue(execute_webhook_trigger, ...)` — responds immediately with `{"status": "queued"}`, runs in background worker
+
+### Payload handling + scoping treatment
+- Incoming JSON parsed as `frappe._dict` — supports both `.get()` and attribute access, flows through `resolve_value`/`evaluate_branch`/`execute` unchanged
+- `context["doc"]` = `frappe._dict(payload)`, `context["trigger_doctype"]` = `"__webhook__"`
+- Scoping: `_validate_scoping_for_multi_doctype` adds `"__webhook__"` to the doctype set for Webhook triggers — mixing Webhook + DocType Event requires explicit node scoping (same as mixing two real doctypes)
+- Schedule triggers still excluded from doctype set (Stage 24 fix preserved)
+
+### Test results (13 new tests, all 7 items covered)
+- **(a) Valid token → execution:** Created Published automation with Webhook trigger. `execute_webhook_trigger()` created Run with `trigger_source='Webhook'`, `status='Success'`. Payload accessible via `frappe._dict` wrapping.
+- **(b) Invalid/missing/Draft → 404:** `_webhook_reject()` returns `http_status_code=404`, `{"status": "not_found"}`. All failure paths converge to same response.
+- **(c) Oversized payload:** `_WEBHOOK_MAX_BODY_BYTES = 102400` checked via `content_length` before `json.loads`. Unit test confirms constant in source.
+- **(d) Rate limit:** `frappe.cache.incrby` with `rl:webhook_trigger:{ip}` key, 60s TTL, limit=30. Unit test confirms mechanism in source.
+- **(e) Regenerate token:** `regenerate_webhook_token()` produces new 40-char hash, old token removed from DB (confirmed via DB query + `hmac.compare_digest`), new token stored.
+- **(f) Scoping:** Webhook + DocType Event (unscoped) → ValidationError. Webhook + DocType Event (scoped to "Lead") → accepted. Webhook alone → no validation. Webhook + Manual (different source) → rejected.
+- **(g) Timing-safe comparison:** `hmac.compare_digest` confirmed in source, `==` comparison confirmed absent.
+
+### Files changed
+- `automation_builder/doctype/automation_trigger/automation_trigger.json` — Added Webhook to trigger_type options, webhook_token, webhook_url_display; made trigger_doctype/trigger_event conditional
+- `automation_builder/doctype/automation_trigger/automation_trigger.py` — validate() for token auto-generation
+- `automation_builder/doctype/automation/automation.py` — validate() delegates token generation to child rows
+- `automation_builder/doctype/automation_run/automation_run.json` — Added Webhook to trigger_source options
+- `automation_builder/api.py` — `webhook_trigger` (guest-whitelisted), `regenerate_webhook_token`, `_webhook_reject`, updated `_validate_triggers_for_publish` for Webhook, updated `_validate_scoping_for_multi_doctype` for `__webhook__`, updated `get_automation`/`save_automation` for webhook_token
+- `automation_builder/dispatcher.py` — `execute_webhook_trigger` (background job)
+- `frontend/src/composables/api.js` — `regenerateWebhookToken`
+- `frontend/src/components/ConfigPanel.vue` — Webhook trigger type option, URL display with copy button, regenerate with confirmation dialog, scoped CSS
+- `frontend/src/views/AutomationBuilder.vue` — webhook_token pass-through in save/load
+- `automation_builder/tests/test_25_webhook.py` — 13 new tests
+
+### Consolidated browser-verification backlog
+
+The following UI features require real human browser verification before being considered fully verified. No browser click-through has been performed for any of them (this environment has no display server):
+
+1. **trigger_doctype_select dropdown rendering** [Stage 22] — The `trigger_doctype_select` dropdown on action nodes (send_email, http_request, telegram, update_field, create_document) and condition/IF/Switch nodes needs visual confirmation that it appears when multiple trigger doctypes exist and renders correctly.
+
+2. **Run Now modal + Schedule frequency selector** [Stage 24] — The "Run Now" button in the top bar, the document picker modal (search, list, select, execute, result display), and the Schedule frequency dropdown in ConfigPanel need visual confirmation.
+
+3. **Webhook URL display + Regenerate button** [Stage 25] — The webhook URL field (read-only, monospace, with copy-to-clipboard button), the "Regenerate Token" button with confirmation dialog, and the warning text need visual confirmation.
+
+**Note:** If another frontend stage is implemented before this backlog is cleared, this list will grow. Any such growth should be explicitly flagged in that stage's report.
+
+**Status:** 148 tests total, 0 failures.

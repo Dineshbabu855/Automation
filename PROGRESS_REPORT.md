@@ -2355,10 +2355,27 @@ Multi-doctype automations (e.g. Lead + ToDo triggers) had several issues:
 - **Scoping addendum (2):** Schedule not in doctype set, Manual counts as distinct
 - **Token resolution (1):** `{{trigger.*}}` resolves to empty when doc=None
 
-### Verification
-- `bench --site learning.localhost migrate` — patch executes, schema syncs, existing rows get trigger_type='DocType Event'
-- All 135 tests pass, 0 failures
-- New fields visible in Automation Trigger and Automation Run DocType schemas
-- `on_doc_event` ignores Manual/Schedule triggers (correct — dispatched elsewhere)
+### Verification (concrete Part D results)
+
+**(a) Manual Trigger — Run Now click against a real document:**
+Created `TEST-Stage24-Manual` with trigger_type='Manual', trigger_doctype='ToDo'. Created real ToDo `3otp10e4ok`. Called `run_automation_manually("TEST-Stage24-Manual", "ToDo", "3otp10e4ok")`. Automation Run `3oubim3qcl` created with `trigger_source='Manual'`, `status='Success'`, `reference_doctype='ToDo'`, `reference_name='3otp10e4ok'`. Direct DB read confirmed `trigger_source='Manual'`.
+
+**(b) Schedule Trigger — forced fire + next_run update:**
+Created `TEST-Stage24-Schedule` with trigger_type='Schedule', schedule_frequency='Hourly'. Set `next_run` to 1 hour in the past via SQL. Called `check_scheduled_automations()`. Automation Run `3to8fnov3j` created with `trigger_source='Schedule'`, `status='Success'`, `reference_doctype=''`, `reference_name=''`. `next_run` updated to `2026-09-14 12:34:15` (1 hour from now). `last_run` set to `2026-09-14 11:34:15`.
+
+**(c) Not-yet-due schedule confirmed NOT to fire:**
+Created `TEST-Stage24-Schedule-Future` with `next_run=2026-09-15 06:04:24` (24 hours out). Runs before tick: 0. Called `check_scheduled_automations()`. Runs after tick: 0. `next_run` unchanged at `2026-09-15 06:04:24`. Future schedule correctly skipped.
+
+**(d) Scoping addendum — real trigger_type rows (not simulated inserts):**
+- **Schedule(ToDo) + Lead(On Update):** `_validate_scoping_for_multi_doctype` — no error. Schedule excluded from doctype set, only 1 distinct doctype (Lead). Unscoped action accepted.
+- **Manual(Lead) + ToDo(After Insert):** ValidationError raised: "multiple trigger DocTypes (Lead, ToDo)... Action node 'send_email' (action-1)". Manual counted identically to DocType Event. 2 distinct doctypes → scoping enforced.
+- **Manual(Lead) + Lead(On Update):** No error. Same doctype (Lead), no ambiguity.
+- **Schedule(ToDo) + Manual(Lead) + ToDo(After Insert):** ValidationError raised. Schedule excluded; Manual(Lead) + ToDo(After Insert) = 2 distinct doctypes.
+
+**Bug found and fixed during verification:** `_validate_scoping_for_multi_doctype` originally counted Schedule trigger rows in the doctype set. Scenario (d.1) failed with a false ValidationError. Fixed by skipping `trigger_type='Schedule'` when building the doctype set. Commit `95137e7`.
+
+### Browser click-through
+
+**No browser click-through was performed.** This environment has no display server. The Run Now modal (document picker + execute button + result display) and the Schedule frequency selector in ConfigPanel.vue were NOT visually tested in a browser. They were verified structurally: the Vue template renders correctly (conditional `v-if="local.trigger_type === 'Manual'"` / `v-if="local.trigger_type === 'Schedule'"`), the `runAutomationManually` and `searchDocuments` API functions were confirmed callable, and the save/load roundtrip preserves `trigger_type` and `schedule_frequency` fields.
 
 **Status:** 135 tests total, 0 failures.

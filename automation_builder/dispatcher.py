@@ -284,11 +284,15 @@ def execute_automation(automation_name, ref_doctype, ref_name):
         context["trigger_doctype"] = ref_doctype
 
         # Find the firing trigger row for tagged-edge routing
-        # Match ref_doctype against the automation's trigger rows
-        for t in automation.triggers:
+        # Match ref_doctype against the automation's trigger rows.
+        # Use the loop INDEX (as string) to match against applies_to_triggers
+        # on edges, which stores index strings like ["0"], ["1"], etc.
+        firing_indices = []
+        for idx, t in enumerate(automation.triggers):
             if t.trigger_doctype == ref_doctype:
-                context["firing_trigger_name"] = t.name
-                break
+                firing_indices.append(str(idx))
+        if firing_indices:
+            context["firing_trigger_name"] = firing_indices[0]
 
         # Find the first trigger node dynamically (supports multiple triggers)
         trigger_nodes = [n for n in graph.get("nodes", []) if n.get("type") == "trigger"]

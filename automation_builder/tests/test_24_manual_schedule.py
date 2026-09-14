@@ -329,6 +329,40 @@ class TestStage26ReachabilityScoping(IntegrationTestCase):
         ]
         _validate_scoping_for_multi_doctype(json.dumps(graph), triggers)
 
+    def test_convergence_two_edges_different_rows_rejected(self):
+        """Regression: applies_to_triggers values are strings but idx is int.
+
+        Two edges from trigger to the same action, each tagged to a different
+        trigger row (e.g. ["0"] and ["1"]). Both rows can reach the action,
+        so it should be flagged as unscoped convergence. Previously failed
+        because ``0 in ["0"]`` is False in Python.
+        """
+        from automation_builder.api import _validate_scoping_for_multi_doctype
+
+        graph = {
+            "nodes": [
+                {"id": "trigger", "type": "trigger", "position": {"x": 250, "y": 50},
+                 "data": {"trigger_doctype": "", "trigger_event": "On Update"}},
+                {"id": "act-shared", "type": "action", "position": {"x": 0, "y": 0},
+                 "data": {"action_type": "create_document", "trigger_doctype_select": "",
+                          "target_doctype": "Note", "field_mapping": []}},
+            ],
+            "edges": [
+                {"id": "e-0", "source": "trigger", "target": "act-shared",
+                 "sourceHandle": "trigger-out", "targetHandle": "act-shared-in-0",
+                 "type": "smoothstep", "applies_to_triggers": ["0"]},
+                {"id": "e-1", "source": "trigger", "target": "act-shared",
+                 "sourceHandle": "trigger-out", "targetHandle": "act-shared-in-1",
+                 "type": "smoothstep", "applies_to_triggers": ["1"]},
+            ],
+        }
+        triggers = [
+            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "ToDo", "trigger_event": "On Update"},
+        ]
+        with self.assertRaises(frappe.ValidationError):
+            _validate_scoping_for_multi_doctype(json.dumps(graph), triggers)
+
 
 class TestStage26WalkerTaggedEdgeRouting(unittest.TestCase):
     """Verify _walk_graph routes based on applies_to_triggers."""

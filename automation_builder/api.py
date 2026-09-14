@@ -113,13 +113,13 @@ def _validate_scoping_for_multi_doctype(graph_json, triggers):
             forward.setdefault(src, []).append(tgt)
 
     # Build edge data map for trigger-row filtering
-    # source_id -> {target_id: edge_data}
+    # source_id -> {target_id: [edge_data, ...]}  (list to handle multiple edges)
     edge_data_map = {}
     for e in edges:
         src = e.get("source")
         tgt = e.get("target")
         if src and tgt:
-            edge_data_map.setdefault(src, {})[tgt] = e
+            edge_data_map.setdefault(src, {}).setdefault(tgt, []).append(e)
 
     # For each trigger row index, compute the set of nodes reachable via forward walk.
     # We match trigger row indices to Trigger nodes in the graph by doctype.
@@ -140,9 +140,19 @@ def _validate_scoping_for_multi_doctype(graph_json, triggers):
 
     trigger_reachability = {}  # trigger_row_index -> set of reachable node_ids
 
+    # Build a map from target_id -> (source_id, edge_data) for IF/Switch scope inference
+    incoming_edge = {}  # target_id -> (source_id, edge_data)
+    for e in edges:
+        src = e.get("source")
+        tgt = e.get("target")
+        if src and tgt:
+            incoming_edge[tgt] = (src, e)
+
+    nodes_map = {n["id"]: n for n in nodes}
+
     for idx in trigger_rows:
         reachable = set()
-        # Find which trigger node(s) in the graph this row maps to
+        trigger_dt = trigger_rows[idx]
         queue = []
         for tn in trigger_nodes:
             if idx in node_to_trigger_indices.get(tn["id"], []):
@@ -154,18 +164,71 @@ def _validate_scoping_for_multi_doctype(graph_json, triggers):
                 continue
             reachable.add(nid)
             targets = forward.get(nid, [])
+
+            # Check if this node is an IF/Switch checking __trigger_doctype__
+            node = nodes_map.get(nid, {})
+            node_type = node.get("type")
+            node_data = node.get("data", {})
+            is_trigger_doctype_branch = (
+                node_type in ("if", "switch")
+                and node_data.get("field_to_check") == "__trigger_doctype__"
+            )
+
             for tgt in targets:
-                edge = edge_data_map.get(nid, {}).get(tgt, {})
-                applies = edge.get("applies_to_triggers") or []
-                # null/empty means "All" — always included
-                if not applies or idx in applies:
-                    queue.append(tgt)
+                edge_list = edge_data_map.get(nid, {}).get(tgt, [])
+
+                # Step 1: Check applies_to_triggers filter
+                # An edge is followed if ANY edge between (nid, tgt) matches
+                any_applies = False
+                matched_edge = None
+                for edge in edge_list:
+                    applies = edge.get("applies_to_triggers") or []
+                    if not applies or str(idx) in applies:
+                        any_applies = True
+                        matched_edge = edge
+                        break
+                if not any_applies:
+                    continue
+
+                # Step 2: IF/Switch scope inference on __trigger_doctype__
+                if is_trigger_doctype_branch:
+                    source_handle = matched_edge.get("sourceHandle", "")
+                    compared_value = node_data.get("value", "")  # for IF
+
+                    if node_type == "if":
+                        if source_handle.endswith("-true"):
+                            # True branch: only if trigger doctype matches the compared value
+                            if trigger_dt != compared_value:
+                                continue
+                        elif source_handle.endswith("-false"):
+                            # False branch: only if trigger doctype does NOT match
+                            if trigger_dt == compared_value:
+                                continue
+                    elif node_type == "switch":
+                        cases = node_data.get("cases", [])
+                        if source_handle == "default":
+                            # Default: only if no case matches
+                            if any(c.get("case_value") == trigger_dt for c in cases):
+                                continue
+                        else:
+                            # Case branch: only if trigger doctype matches the case value
+                            case_idx_str = source_handle.replace("case-", "")
+                            try:
+                                case_idx = int(case_idx_str)
+                                if case_idx < len(cases):
+                                    if cases[case_idx].get("case_value") != trigger_dt:
+                                        continue
+                                else:
+                                    continue
+                            except (ValueError, IndexError):
+                                continue
+
+                queue.append(tgt)
 
         trigger_reachability[idx] = reachable
 
     # For each field-reading node, compute which trigger rows can reach it
     unscoped = []
-    nodes_map = {n["id"]: n for n in nodes}
 
     for node in nodes:
         node_type = node.get("type")

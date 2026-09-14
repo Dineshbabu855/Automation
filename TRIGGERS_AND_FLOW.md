@@ -382,7 +382,115 @@ For Case 2:
 
 ---
 
-## 8. Testing Notes & Honest Gaps
+## 8. Trigger-Row-Tagged Edges (Stage 26)
+
+### The problem
+
+Before Stage 26, the Trigger node could only have **one** outgoing edge (linear-only
+enforced by the canvas). All trigger rows shared the same downstream path. The save-time
+validation used a **blanket doctype-count** check: if the automation had 2+ distinct trigger
+doctypes anywhere, every field-reading node had to have explicit `trigger_doctype_select`
+set — even nodes on separate branches that were only reachable from one doctype.
+
+This produced false positives: a user could wire two independent branches (one per doctype)
+and still get "no explicit DocType scope" on nodes that were only reachable from one
+trigger row.
+
+### The solution: tagged edges + reachability
+
+**Tagged edges**: each edge from the Trigger node carries an `applies_to_triggers` field —
+a list of trigger-row indices (as strings: `["0"]`, `["1"]`, etc.) or `null` (meaning "All").
+When the Trigger node has multiple outgoing edges, the dispatcher filters them by this field
+before routing. Only edges whose `applies_to_triggers` includes the firing trigger row's
+index are followed.
+
+**Reachability-based scoping**: the save-time validation now performs a BFS from each
+trigger row through tagged edges to compute which doctypes can actually reach each
+unscoped node. A node is only rejected when it is reachable from trigger rows spanning
+**2+ distinct doctypes** AND lacks explicit `trigger_doctype_select`.
+
+### Edge data model
+
+```json
+{
+  "id": "e-trigger-cond-lead",
+  "source": "trigger",
+  "target": "cond-lead",
+  "sourceHandle": "trigger-out",
+  "targetHandle": "cond-lead-in",
+  "type": "smoothstep",
+  "applies_to_triggers": ["0"]
+}
+```
+
+| `applies_to_triggers` value | Meaning |
+|---|---|
+| `null` or absent | "All" — this edge is followed for every trigger row |
+| `["0"]` | Only follows when trigger row index 0 fires |
+| `["0", "1"]` | Follows when either row 0 or row 1 fires |
+
+### How the walker uses tagged edges
+
+In `dispatcher.py:_walk_graph`, when the Trigger node has outgoing edges with
+`applies_to_triggers` tags:
+
+1. The `firing_trigger_name` is looked up from `context["firing_trigger_name"]`
+2. Each outgoing edge's `applies_to_triggers` is checked
+3. Only matching edges are kept for routing
+4. If no edges match, execution stops with a "skipped" branch trace
+
+### How the canvas picker works
+
+When the user creates a **second** outgoing edge from the Trigger node, the canvas shows
+a picker dialog: "This path applies to:" with checkboxes per trigger row + "All". The
+default is "All" (null). The user can select specific trigger rows to restrict the path.
+
+### How reachability analysis works
+
+The validation in `api.py:_validate_scoping_for_multi_doctype`:
+
+1. Maps trigger-row indices to Trigger nodes in the graph (by doctype)
+2. For each trigger row, BFS follows edges from its Trigger node, respecting
+   `applies_to_triggers` tags
+3. For each field-reading node (Action, Condition, IF, Switch), checks which
+   trigger rows can reach it
+4. If 0 or 1 distinct doctypes reach the node → no ambiguity → passes
+5. If 2+ distinct doctypes reach the node AND `trigger_doctype_select` is empty → rejects
+
+### Worked example: two separate paths
+
+```
+Automation: "Lead + ToDo Follow-up"
+  Triggers: Lead / On Update, ToDo / On Update
+
+  Graph:
+    trigger ──(applies_to_triggers: ["0"])──> Condition(status=New)
+                                                    │
+                                              Send Email (scoped to Lead)
+    trigger ──(applies_to_triggers: ["1"])──> Condition(priority=High)
+                                                    │
+                                              Create Document (scoped to ToDo)
+```
+
+- **Lead updated**: trigger row 0 fires → edge tagged `["0"]` followed → Condition
+  checks status → Send Email executes. Edge tagged `["1"]` is skipped.
+- **ToDo updated**: trigger row 1 fires → edge tagged `["1"]` followed → Condition
+  checks priority → Create Document executes. Edge tagged `["0"]` is skipped.
+
+Both paths are independent. No `trigger_doctype_select` is needed on the Condition
+nodes because each is only reachable from one trigger row.
+
+### Backward compatibility
+
+- Existing automations have no `applies_to_triggers` on edges (null/absent = "All")
+- The walker treats null as "always follow" — all existing automations work unchanged
+- The reachability analysis treats null edges as "reachable from all trigger rows" —
+  same as the old blanket check for shared paths
+- No migration needed: edges without the field default to null
+
+---
+
+## 9. Testing Notes & Honest Gaps
 
 ### Why full-path tests matter
 
@@ -425,7 +533,11 @@ regression in the dispatch path would have gone undetected.
 - **Condition node with `trigger_doctype_select`**: `test_condition_node_scoped_skips_on_wrong_trigger`
   full-path test exercises the Condition node skip branch.
 - **Save-time validation**: `TestMultiDoctypeSaveValidation` tests reject unscoped actions,
-  unscoped conditions, and allow scoped nodes with "any" mode.
+  unscoped conditions, and allow scoped nodes with "any" mode. **Note:** the original
+  validation used a blanket doctype-count check. Stage 26 replaced this with
+  reachability-based analysis (see Section 8). The test_graphs with edges from both
+  triggers to the same action still correctly reject; graphs where nodes are reachable
+  from only one trigger row now correctly pass.
 - **`_evaluate_trigger_conditions` doctype filter**: fixed to only evaluate trigger rows
   matching the document's doctype, preventing false matches across doctypes.
 

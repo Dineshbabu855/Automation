@@ -56,16 +56,16 @@
     "options": "Success\nFailed\nSkipped",
     "reqd": 1
    },
-   {
-    "fieldname": "trigger_source",
-    "fieldtype": "Select",
-    "label": "Trigger Source",
-    "options": "DocType Event\nManual\nSchedule",
-    "default": "DocType Event",
-    "read_only": 1,
-    "in_list_view": 1,
-    "description": "How this run was triggered. Manual = user test run via Run Now."
-   },
+    {
+      "fieldname": "trigger_source",
+      "fieldtype": "Select",
+      "label": "Trigger Source",
+      "options": "DocType Event\nManual\nSchedule\nWebhook",
+      "default": "DocType Event",
+      "read_only": 1,
+      "in_list_view": 1,
+      "description": "How this run was triggered."
+    },
   {
    "fieldname": "started_at",
    "fieldtype": "Datetime",

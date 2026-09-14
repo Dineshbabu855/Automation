@@ -6,4 +6,7 @@ from frappe.model.document import Document
 
 
 class AutomationTrigger(Document):
-    pass
+    def validate(self):
+        """Auto-generate webhook_token for Webhook triggers."""
+        if self.trigger_type == "Webhook" and not self.webhook_token:
+            self.webhook_token = frappe.generate_hash(length=40)

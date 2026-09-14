@@ -565,6 +565,107 @@ def _walk_graph(graph, start_id, context=None):
 
 
 # ---------------------------------------------------------------------------
+# Webhook Trigger — executed via frappe.enqueue from webhook_trigger endpoint
+# ---------------------------------------------------------------------------
+
+_WEBHOOK_DOCTYPE = "__webhook__"
+
+
+def execute_webhook_trigger(automation_name, payload):
+    """Execute an automation triggered by an external webhook POST.
+
+    Called via frappe.enqueue — runs in a background worker. The incoming
+    JSON payload is wrapped as a frappe._dict so {{trigger.fieldname}} tokens
+    resolve via the same resolve_value path used by every other action type.
+
+    context["doc"] = frappe._dict(payload)
+    context["trigger_doctype"] = "__webhook__"
+    """
+    automation = frappe.get_doc("Automation", automation_name)
+
+    graph_json = automation.graph_definition or automation.workflow_json
+    if not graph_json:
+        return
+
+    run = frappe.get_doc({
+        "doctype": "Automation Run",
+        "automation": automation_name,
+        "reference_doctype": "",
+        "reference_name": "",
+        "trigger_source": "Webhook",
+        "started_at": frappe.utils.now_datetime(),
+    })
+
+    try:
+        graph = json.loads(graph_json)
+    except (json.JSONDecodeError, TypeError):
+        run.status = "Failed"
+        run.error = "Invalid graph_definition JSON"
+        run.ended_at = frappe.utils.now_datetime()
+        run.insert(ignore_permissions=True)
+        return
+
+    node_map = {n["id"]: n for n in graph.get("nodes", [])}
+
+    # Wrap payload as frappe._dict for .get() and attribute access
+    doc = frappe._dict(payload) if isinstance(payload, dict) else frappe._dict()
+
+    context = {
+        "doc": doc,
+        "ref_doctype": "",
+        "ref_name": "",
+        "trigger_doctype": _WEBHOOK_DOCTYPE,
+    }
+
+    trigger_nodes = [n for n in graph.get("nodes", []) if n.get("type") == "trigger"]
+    start_id = trigger_nodes[0]["id"] if trigger_nodes else "trigger"
+    step_trace = _walk_graph(graph, start_id, context)
+
+    any_failed = False
+    step_results = []
+
+    for entry in step_trace:
+        entry_type = entry.get("type")
+        entry_node_id = entry.get("node_id")
+
+        if entry_type == "branch":
+            step_result = {
+                "step_type": entry.get("node_type", "unknown"),
+                "status": "Success",
+                "branch_taken": entry.get("branch_taken", ""),
+                "output": entry.get("output", ""),
+            }
+            step_results.append(step_result)
+            _create_run_step(run, entry, node_map)
+
+        elif entry_type == "action":
+            node = node_map.get(entry_node_id, {})
+            data = node.get("data", {})
+            action_type = data.get("action_type")
+            if not action_type:
+                continue
+            config = {k: v for k, v in data.items() if k != "action_type"}
+            step_result = _execute_action(action_type, config, context)
+            step_results.append(step_result)
+
+            if step_result.get("status") == "Failed":
+                any_failed = True
+
+            _create_run_step(run, {
+                "type": "action",
+                "node_id": entry_node_id,
+                "step_type": action_type,
+                "status": step_result.get("status", "Failed"),
+                "output": step_result.get("output", step_result.get("error", "")),
+            }, node_map)
+
+    run.status = "Failed" if any_failed else "Success"
+    run.log = json.dumps(step_results, indent=2)
+    run.ended_at = frappe.utils.now_datetime()
+    run.insert(ignore_permissions=True)
+
+
+# ---------------------------------------------------------------------------
 # Schedule Trigger — tick function called by scheduler_events
 # ---------------------------------------------------------------------------
 

@@ -8,18 +8,19 @@
       "fieldname": "trigger_type",
       "fieldtype": "Select",
       "label": "Trigger Type",
-      "options": "DocType Event\nManual\nSchedule",
+      "options": "DocType Event\nManual\nSchedule\nWebhook",
       "default": "DocType Event",
       "reqd": 1,
       "index": 1,
-      "description": "DocType Event: fires on document save. Manual: user triggers via Run Now. Schedule: fires on a time interval."
+      "description": "DocType Event: fires on document save. Manual: user triggers via Run Now. Schedule: fires on a time interval. Webhook: fires on external HTTP POST."
     },
     {
       "fieldname": "trigger_doctype",
       "fieldtype": "Link",
       "label": "Trigger DocType",
       "options": "DocType",
-      "reqd": 1,
+      "depends_on": "eval:doc.trigger_type !== 'Webhook'",
+      "mandatory_depends_on": "eval:doc.trigger_type !== 'Webhook'",
       "index": 1
     },
     {
@@ -27,9 +28,9 @@
       "fieldtype": "Select",
       "label": "Trigger Event",
       "options": "After Insert\nOn Update\nOn Submit\nOn Cancel",
-      "reqd": 1,
-      "index": 1,
-      "depends_on": "eval:doc.trigger_type === 'DocType Event'"
+      "depends_on": "eval:doc.trigger_type === 'DocType Event'",
+      "mandatory_depends_on": "eval:doc.trigger_type === 'DocType Event'",
+      "index": 1
     },
     {
       "fieldname": "schedule_frequency",
@@ -51,6 +52,23 @@
       "label": "Last Run",
       "read_only": 1,
       "depends_on": "eval:doc.trigger_type === 'Schedule'"
+    },
+    {
+      "fieldname": "webhook_token",
+      "fieldtype": "Data",
+      "label": "Webhook Token",
+      "hidden": 1,
+      "read_only": 1,
+      "unique": 1,
+      "description": "Auto-generated secret token. Never displayed in list views."
+    },
+    {
+      "fieldname": "webhook_url_display",
+      "fieldtype": "Data",
+      "label": "Webhook URL",
+      "read_only": 1,
+      "depends_on": "eval:doc.trigger_type === 'Webhook' && doc.webhook_token",
+      "description": "POST to this URL to trigger the automation. Token is embedded in the URL."
     },
     {
       "fieldname": "condition_logic",

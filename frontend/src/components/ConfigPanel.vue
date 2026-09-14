@@ -13,6 +13,7 @@
           <option value="DocType Event">DocType Event</option>
           <option value="Manual">Manual (Run Now)</option>
           <option value="Schedule">Schedule</option>
+          <option value="Webhook">Webhook</option>
         </select>
         <p v-if="local.trigger_type === 'Manual'" class="ab-config-hint">
           User clicks "Run Now" and picks a document to test against.
@@ -20,8 +21,11 @@
         <p v-else-if="local.trigger_type === 'Schedule'" class="ab-config-hint">
           Fires automatically on a time interval. No triggering document.
         </p>
+        <p v-else-if="local.trigger_type === 'Webhook'" class="ab-config-hint">
+          Fires when an external system POSTs JSON to the webhook URL.
+        </p>
       </div>
-      <div class="ab-config-group">
+      <div v-if="local.trigger_type !== 'Webhook'" class="ab-config-group">
         <label>DocType</label>
         <select v-model="local.trigger_doctype" @change="onDocTypeChange">
           <option value="">Select DocType</option>
@@ -44,6 +48,27 @@
           <option value="Daily">Daily</option>
           <option value="Weekly">Weekly</option>
         </select>
+      </div>
+      <!-- Webhook URL display -->
+      <div v-if="local.trigger_type === 'Webhook' && local.webhook_token" class="ab-config-group">
+        <label>Webhook URL</label>
+        <div class="ab-webhook-url-row">
+          <input
+            type="text"
+            :value="webhookUrl"
+            readonly
+            class="ab-webhook-url-input"
+          />
+          <button class="ab-btn ab-btn-ghost ab-btn-sm" @click="copyWebhookUrl" title="Copy URL">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+          </button>
+        </div>
+        <button class="ab-btn ab-btn-ghost ab-btn-sm ab-webhook-regen" @click="confirmRegenerateToken">
+          Regenerate Token
+        </button>
+        <p class="ab-config-hint ab-webhook-warning">
+          Regenerating will immediately invalidate the old URL.
+        </p>
       </div>
     </template>
 
@@ -265,6 +290,49 @@ const currentSchema = computed(() => {
   return at ? at.config_schema : []
 })
 
+// Webhook URL computed property
+const webhookUrl = computed(() => {
+  if (!local.value.webhook_token) return ''
+  const base = window.location.origin
+  return `${base}/api/method/automation_builder.api.webhook_trigger?token=${local.value.webhook_token}`
+})
+
+function copyWebhookUrl() {
+  if (webhookUrl.value) {
+    navigator.clipboard.writeText(webhookUrl.value).then(() => {
+      if (window.frappe?.show_alert) {
+        window.frappe.show_alert({ message: 'Webhook URL copied', indicator: 'green' })
+      }
+    })
+  }
+}
+
+async function confirmRegenerateToken() {
+  const confirmed = window.confirm(
+    'Regenerating the webhook token will immediately invalidate the old URL. Any external systems using the current URL will stop working. Continue?'
+  )
+  if (!confirmed) return
+
+  try {
+    const { regenerateWebhookToken } = await import('../composables/api.js')
+    const result = await regenerateWebhookToken({
+      automation_name: props.nodeId?.startsWith('trigger') ? '' : props.nodeId,
+      trigger_index: 0,
+    })
+    if (result?.token) {
+      local.value.webhook_token = result.token
+      if (window.frappe?.show_alert) {
+        window.frappe.show_alert({ message: 'Token regenerated — old URL invalidated', indicator: 'green' })
+      }
+    }
+  } catch (e) {
+    console.error(e)
+    if (window.frappe?.show_alert) {
+      window.frappe.show_alert({ message: 'Failed to regenerate token', indicator: 'red' })
+    }
+  }
+}
+
 function isUnaryOperator(op) {
   return op === 'is set' || op === 'is not set'
 }
@@ -374,3 +442,31 @@ watch(() => props.nodeData, (val) => {
   local.value = { ...val }
 }, { deep: true })
 </script>
+
+<style scoped>
+.ab-webhook-url-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.ab-webhook-url-input {
+  flex: 1;
+  font-family: monospace;
+  font-size: 11px;
+  padding: 6px 8px;
+  border: 1px solid var(--gray-200);
+  border-radius: 6px;
+  background: var(--gray-50);
+  color: var(--gray-700);
+  min-width: 0;
+}
+.ab-webhook-regen {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--red-500);
+}
+.ab-webhook-warning {
+  color: var(--red-400);
+  font-size: 11px;
+}
+</style>

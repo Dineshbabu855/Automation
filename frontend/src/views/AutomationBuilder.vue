@@ -935,12 +935,13 @@ async function save() {
     const triggers = []
     const triggerNodes = nodes.value.filter(n => n.type === 'trigger')
     for (const trigger of triggerNodes) {
-      if (!trigger.data?.trigger_doctype) continue
+      if (!trigger.data?.trigger_doctype && trigger.data?.trigger_type !== 'Webhook') continue
       triggers.push({
         trigger_type: trigger.data.trigger_type || 'DocType Event',
-        trigger_doctype: trigger.data.trigger_doctype,
+        trigger_doctype: trigger.data.trigger_doctype || '',
         trigger_event: trigger.data.trigger_event || 'On Update',
         schedule_frequency: trigger.data.schedule_frequency || 'Hourly',
+        webhook_token: trigger.data.webhook_token || '',
         condition_logic: trigger.data.condition_logic || 'All must match',
         conditions: trigger.data.conditions || [],
       })
@@ -1038,8 +1039,11 @@ onMounted(async () => {
             // Match triggers by index — each graph trigger node maps to a DB trigger row
             for (let i = 0; i < triggerNodes.length && i < auto.triggers.length; i++) {
               const t = auto.triggers[i]
+              triggerNodes[i].data.trigger_type = t.trigger_type || 'DocType Event'
               triggerNodes[i].data.trigger_doctype = t.trigger_doctype || ''
               triggerNodes[i].data.trigger_event = t.trigger_event || 'On Update'
+              triggerNodes[i].data.schedule_frequency = t.schedule_frequency || 'Hourly'
+              triggerNodes[i].data.webhook_token = t.webhook_token || ''
               triggerNodes[i].data.condition_logic = t.condition_logic || 'All must match'
               triggerNodes[i].data.conditions = t.conditions || []
             }
@@ -1072,8 +1076,11 @@ onMounted(async () => {
         if (defaultTrigger && auto.triggers.length === 1) {
           // Single trigger — use the default node
           const t = auto.triggers[0]
+          defaultTrigger.data.trigger_type = t.trigger_type || 'DocType Event'
           defaultTrigger.data.trigger_doctype = t.trigger_doctype || ''
           defaultTrigger.data.trigger_event = t.trigger_event || 'On Update'
+          defaultTrigger.data.schedule_frequency = t.schedule_frequency || 'Hourly'
+          defaultTrigger.data.webhook_token = t.webhook_token || ''
           defaultTrigger.data.condition_logic = t.condition_logic || 'All must match'
           defaultTrigger.data.conditions = t.conditions || []
         } else if (auto.triggers.length > 1) {
@@ -1088,8 +1095,11 @@ onMounted(async () => {
               type: 'trigger',
               position: { x: 250, y: yPos },
               data: {
+                trigger_type: t.trigger_type || 'DocType Event',
                 trigger_doctype: t.trigger_doctype || '',
                 trigger_event: t.trigger_event || 'On Update',
+                schedule_frequency: t.schedule_frequency || 'Hourly',
+                webhook_token: t.webhook_token || '',
                 condition_logic: t.condition_logic || 'All must match',
                 conditions: t.conditions || [],
               },

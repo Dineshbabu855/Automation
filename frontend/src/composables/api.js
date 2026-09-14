@@ -57,3 +57,7 @@ export function runAutomationManually(data) {
 export function searchDocuments(doctype, query) {
   return call('search_documents', { doctype, query })
 }
+
+export function regenerateWebhookToken(data) {
+  return call('regenerate_webhook_token', data)
+}

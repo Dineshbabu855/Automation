@@ -72,7 +72,7 @@ def evaluate_branch(config, context):
     else:
         result = str(actual) == str(expected)
 
-    handle = "if-true" if result else "if-false"
+    handle = "true" if result else "false"
     log_msg = (
         f"IF {field} {operator_str} {expected!r} -> "
         f"{'TRUE' if result else 'FALSE'} (actual: {actual!r})"

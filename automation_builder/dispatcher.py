@@ -547,10 +547,15 @@ def _walk_graph(graph, start_id, context=None):
                 "branch_taken": source_handle,
                 "output": log_msg,
             })
-            # Follow only the matching edge
+            # Follow only the matching edge.
+            # source_handle from evaluate_branch is a bare suffix like
+            # "if-true", "if-false", "case-0", "default".
+            # Edge sourceHandles are prefixed with the node ID, e.g.
+            # "if-1-true", "sw-1-case-0".  Match by checking whether the
+            # edge handle ends with the expected suffix.
             next_id = None
             for sh, tgt, _e_data in outgoing:
-                if sh == source_handle:
+                if sh == source_handle or sh.endswith("-" + source_handle):
                     next_id = tgt
                     break
             if next_id is None and outgoing:

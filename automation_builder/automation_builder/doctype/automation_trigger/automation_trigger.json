@@ -5,6 +5,16 @@
   "istable": 1,
   "fields": [
     {
+      "fieldname": "trigger_type",
+      "fieldtype": "Select",
+      "label": "Trigger Type",
+      "options": "DocType Event\nManual\nSchedule",
+      "default": "DocType Event",
+      "reqd": 1,
+      "index": 1,
+      "description": "DocType Event: fires on document save. Manual: user triggers via Run Now. Schedule: fires on a time interval."
+    },
+    {
       "fieldname": "trigger_doctype",
       "fieldtype": "Link",
       "label": "Trigger DocType",
@@ -18,7 +28,29 @@
       "label": "Trigger Event",
       "options": "After Insert\nOn Update\nOn Submit\nOn Cancel",
       "reqd": 1,
-      "index": 1
+      "index": 1,
+      "depends_on": "eval:doc.trigger_type === 'DocType Event'"
+    },
+    {
+      "fieldname": "schedule_frequency",
+      "fieldtype": "Select",
+      "label": "Frequency",
+      "options": "Hourly\nDaily\nWeekly",
+      "depends_on": "eval:doc.trigger_type === 'Schedule'"
+    },
+    {
+      "fieldname": "next_run",
+      "fieldtype": "Datetime",
+      "label": "Next Run",
+      "read_only": 1,
+      "depends_on": "eval:doc.trigger_type === 'Schedule'"
+    },
+    {
+      "fieldname": "last_run",
+      "fieldtype": "Datetime",
+      "label": "Last Run",
+      "read_only": 1,
+      "depends_on": "eval:doc.trigger_type === 'Schedule'"
     },
     {
       "fieldname": "condition_logic",

@@ -4,21 +4,22 @@
  "creation": "2026-09-07 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
-  "field_order": [
-   "automation",
-   "reference_doctype",
-   "reference_name",
-   "cb_status",
-   "status",
-   "started_at",
-   "ended_at",
-   "log_section",
-   "log",
-   "steps_section",
-   "steps",
-   "error_section",
-   "error"
-  ],
+   "field_order": [
+    "automation",
+    "reference_doctype",
+    "reference_name",
+    "cb_status",
+    "status",
+    "trigger_source",
+    "started_at",
+    "ended_at",
+    "log_section",
+    "log",
+    "steps_section",
+    "steps",
+    "error_section",
+    "error"
+   ],
  "fields": [
   {
    "fieldname": "automation",
@@ -47,14 +48,24 @@
    "fieldname": "cb_status",
    "fieldtype": "Column Break"
   },
-  {
-   "fieldname": "status",
-   "fieldtype": "Select",
-   "in_list_view": 1,
-   "label": "Status",
-   "options": "Success\nFailed\nSkipped",
-   "reqd": 1
-  },
+   {
+    "fieldname": "status",
+    "fieldtype": "Select",
+    "in_list_view": 1,
+    "label": "Status",
+    "options": "Success\nFailed\nSkipped",
+    "reqd": 1
+   },
+   {
+    "fieldname": "trigger_source",
+    "fieldtype": "Select",
+    "label": "Trigger Source",
+    "options": "DocType Event\nManual\nSchedule",
+    "default": "DocType Event",
+    "read_only": 1,
+    "in_list_view": 1,
+    "description": "How this run was triggered. Manual = user test run via Run Now."
+   },
   {
    "fieldname": "started_at",
    "fieldtype": "Datetime",

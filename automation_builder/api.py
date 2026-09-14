@@ -21,19 +21,25 @@ def _validate_triggers_for_publish(triggers):
 
     Called when status is being set to Published. An automation with no
     trigger data would be a silent no-op — Published but never fires.
+
+    For DocType Event triggers: both trigger_doctype and trigger_event required.
+    For Manual/Schedule triggers: only trigger_doctype required.
     """
     if not triggers:
         frappe.throw(
-            _("Cannot publish: at least one trigger with trigger_doctype and "
-              "trigger_event is required.")
+            _("Cannot publish: at least one trigger with trigger_doctype is required.")
         )
     for i, trigger in enumerate(triggers):
         doctype = trigger.get("trigger_doctype") if isinstance(trigger, dict) else getattr(trigger, "trigger_doctype", None)
         event = trigger.get("trigger_event") if isinstance(trigger, dict) else getattr(trigger, "trigger_event", None)
-        if not doctype or not event:
+        trigger_type = trigger.get("trigger_type", "DocType Event") if isinstance(trigger, dict) else getattr(trigger, "trigger_type", "DocType Event")
+        if not doctype:
             frappe.throw(
-                _("Cannot publish: trigger row {0} is missing trigger_doctype "
-                  "or trigger_event.").format(i + 1)
+                _("Cannot publish: trigger row {0} is missing trigger_doctype.").format(i + 1)
+            )
+        if trigger_type == "DocType Event" and not event:
+            frappe.throw(
+                _("Cannot publish: DocType Event trigger row {0} is missing trigger_event.").format(i + 1)
             )
 
 
@@ -179,8 +185,12 @@ def get_automation(name):
     triggers = []
     for trigger in doc.triggers:
         triggers.append({
+            "trigger_type": trigger.trigger_type or "DocType Event",
             "trigger_doctype": trigger.trigger_doctype,
             "trigger_event": trigger.trigger_event,
+            "schedule_frequency": trigger.schedule_frequency,
+            "next_run": str(trigger.next_run) if trigger.next_run else None,
+            "last_run": str(trigger.last_run) if trigger.last_run else None,
             "condition_logic": trigger.condition_logic or "All must match",
             "conditions": conditions_map.get(trigger.name, []),
             # Legacy flat fields for backward compat display
@@ -458,6 +468,92 @@ def get_action_types():
 def can_publish():
     """Check if current user can publish automations (System Manager only)."""
     return "System Manager" in frappe.get_roles()
+
+
+@frappe.whitelist()
+def search_documents(doctype, query=""):
+    """Search for documents of a given DocType for the Manual Trigger picker.
+
+    Returns up to 20 matching documents with name and a display label.
+    """
+    if not frappe.session.user or frappe.session.user == "Guest":
+        frappe.throw(_("Login required"), frappe.DoesNotExistError)
+    if not frappe.db.exists("DocType", doctype):
+        frappe.throw(_("DocType {0} does not exist").format(doctype))
+    if not frappe.has_permission(doctype, "read"):
+        frappe.throw(_("Insufficient permissions to read {0}").format(doctype))
+
+    meta = frappe.get_meta(doctype)
+    title_field = meta.title_field or "name"
+
+    filters = {}
+    if query:
+        filters[title_field] = ["like", f"%{query}%"]
+
+    docs = frappe.get_all(
+        doctype,
+        fields=["name", title_field],
+        filters=filters,
+        limit_page_length=20,
+        order_by="modified desc",
+    )
+
+    return [
+        {"name": d.name, "label": d.get(title_field) or d.name}
+        for d in docs
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Manual Trigger endpoint
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist()
+def run_automation_manually(automation_name, reference_doctype, reference_name):
+    """Execute an automation as a manual test run against a real document.
+
+    Permission: user must have write access to the Automation doc.
+    Runs synchronously (not via frappe.enqueue) since the user is waiting.
+    The resulting Automation Run record is marked with trigger_source='Manual'.
+    """
+    if not frappe.session.user or frappe.session.user == "Guest":
+        frappe.throw(_("Login required"), frappe.DoesNotExistError)
+
+    if not frappe.has_permission("Automation", "write"):
+        frappe.throw(_("You need write access to the Automation to test-run it"))
+
+    if not frappe.db.exists("Automation", automation_name):
+        frappe.throw(_("Automation {0} does not exist").format(automation_name))
+
+    if not frappe.db.exists(reference_doctype, reference_name):
+        frappe.throw(_("{0} {1} does not exist").format(reference_doctype, reference_name))
+
+    from automation_builder.dispatcher import execute_automation
+
+    # Execute synchronously — reuse the exact same execute_automation path
+    execute_automation(automation_name, reference_doctype, reference_name)
+
+    # Mark the most recent run for this automation+document as Manual
+    frappe.db.sql(
+        "UPDATE `tabAutomation Run` SET trigger_source = 'Manual' "
+        "WHERE automation = %s AND reference_doctype = %s AND reference_name = %s "
+        "ORDER BY creation DESC LIMIT 1",
+        (automation_name, reference_doctype, reference_name),
+    )
+
+    # Return the run record
+    run = frappe.get_all(
+        "Automation Run",
+        filters={
+            "automation": automation_name,
+            "reference_doctype": reference_doctype,
+            "reference_name": reference_name,
+        },
+        fields=["name", "status", "trigger_source", "started_at", "ended_at", "log"],
+        order_by="creation desc",
+        limit_page_length=1,
+    )
+    return run[0] if run else {"status": "unknown"}
 
 
 # ---------------------------------------------------------------------------

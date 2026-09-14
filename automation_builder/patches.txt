@@ -1,2 +1,3 @@
 # Patches for automation_builder
 # Note: Stage 17a migration uses standalone script: automation_builder.migrate_17a.run
+automation_builder.patches.stage24_add_trigger_type

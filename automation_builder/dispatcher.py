@@ -138,6 +138,7 @@ def on_doc_event(doc, method):
     try:
         # Query automations: must be enabled AND published
         # Join with Automation Trigger child table to match trigger_doctype and trigger_event
+        # Only match DocType Event triggers — Manual and Schedule are dispatched separately
         automations = frappe.db.sql("""
             SELECT DISTINCT a.name
             FROM `tabAutomation` a
@@ -145,6 +146,7 @@ def on_doc_event(doc, method):
                 ON at.parent = a.name
             WHERE a.enabled = 1
                 AND a.status = 'Published'
+                AND at.trigger_type = 'DocType Event'
                 AND at.trigger_doctype = %s
                 AND at.trigger_event = %s
         """, (doc.doctype, trigger_event), as_dict=True)
@@ -560,6 +562,156 @@ def _walk_graph(graph, start_id, context=None):
             current_id = outgoing[0][1] if len(outgoing) == 1 else (outgoing[0][1] if outgoing else None)
 
     return trace
+
+
+# ---------------------------------------------------------------------------
+# Schedule Trigger — tick function called by scheduler_events
+# ---------------------------------------------------------------------------
+
+def check_scheduled_automations():
+    """Poll for due Schedule-type automations and execute them.
+
+    Registered in hooks.py as a scheduler_events hook (every 15 minutes).
+    Finds Published, enabled automations with a Schedule-type trigger row
+    where next_run is null or in the past, executes each through the standard
+    execute_automation path, then computes and stores the new next_run.
+
+    Schedule triggers have no triggering document — execute_automation is
+    called with an empty-string ref_name and doc=None context. Token
+    resolution for {{trigger.*}} degrades to empty strings (no crash).
+    """
+    if frappe.flags.get("in_migrate"):
+        return
+
+    now = frappe.utils.now_datetime()
+
+    # Find due schedule triggers
+    due_triggers = frappe.db.sql("""
+        SELECT at.name AS trigger_name, at.parent AS automation_name,
+               at.schedule_frequency, at.next_run
+        FROM `tabAutomation Trigger` at
+        INNER JOIN `tabAutomation` a ON a.name = at.parent
+        WHERE at.trigger_type = 'Schedule'
+            AND a.enabled = 1
+            AND a.status = 'Published'
+            AND (at.next_run IS NULL OR at.next_run <= %s)
+    """, (now,), as_dict=True)
+
+    for trigger in due_triggers:
+        try:
+            _execute_schedule_trigger(trigger, now)
+        except Exception:
+            frappe.log_error(
+                title=f"Schedule trigger error: {trigger.automation_name}"
+            )
+
+
+def _execute_schedule_trigger(trigger, now):
+    """Execute a single schedule trigger and compute next_run."""
+    automation_name = trigger.automation_name
+    frequency = trigger.schedule_frequency or "Hourly"
+
+    # Execute through the standard path with empty ref_doctype/ref_name
+    # (no triggering document for Schedule triggers)
+    from automation_builder.action_types._helpers import TRIGGER_DOCTYPE_FIELD
+
+    automation = frappe.get_doc("Automation", automation_name)
+    graph_json = automation.graph_definition or automation.workflow_json
+    if not graph_json:
+        return
+
+    # Create Automation Run with trigger_source='Schedule'
+    run = frappe.get_doc({
+        "doctype": "Automation Run",
+        "automation": automation_name,
+        "reference_doctype": "",
+        "reference_name": "",
+        "trigger_source": "Schedule",
+        "started_at": now,
+    })
+
+    try:
+        graph = json.loads(graph_json)
+    except (json.JSONDecodeError, TypeError):
+        run.status = "Failed"
+        run.error = "Invalid graph_definition JSON"
+        run.ended_at = now
+        run.insert(ignore_permissions=True)
+        return
+
+    node_map = {n["id"]: n for n in graph.get("nodes", [])}
+
+    # Build context with doc=None — {{trigger.*}} resolves to empty
+    context = {"doc": None, "ref_doctype": "", "ref_name": "", "trigger_doctype": ""}
+
+    trigger_nodes = [n for n in graph.get("nodes", []) if n.get("type") == "trigger"]
+    start_id = trigger_nodes[0]["id"] if trigger_nodes else "trigger"
+    step_trace = _walk_graph(graph, start_id, context)
+
+    any_failed = False
+    step_results = []
+
+    for entry in step_trace:
+        entry_type = entry.get("type")
+        entry_node_id = entry.get("node_id")
+
+        if entry_type == "branch":
+            step_result = {
+                "step_type": entry.get("node_type", "unknown"),
+                "status": "Success",
+                "branch_taken": entry.get("branch_taken", ""),
+                "output": entry.get("output", ""),
+            }
+            step_results.append(step_result)
+            _create_run_step(run, entry, node_map)
+
+        elif entry_type == "action":
+            node = node_map.get(entry_node_id, {})
+            data = node.get("data", {})
+            action_type = data.get("action_type")
+            if not action_type:
+                continue
+            config = {k: v for k, v in data.items() if k != "action_type"}
+            step_result = _execute_action(action_type, config, context)
+            step_results.append(step_result)
+
+            if step_result.get("status") == "Failed":
+                any_failed = True
+
+            _create_run_step(run, {
+                "type": "action",
+                "node_id": entry_node_id,
+                "step_type": action_type,
+                "status": step_result.get("status", "Failed"),
+                "output": step_result.get("output", step_result.get("error", "")),
+            }, node_map)
+
+    run.status = "Failed" if any_failed else "Success"
+    run.log = json.dumps(step_results, indent=2)
+    run.ended_at = frappe.utils.now_datetime()
+    run.insert(ignore_permissions=True)
+
+    # Compute next_run based on frequency
+    next_run = _compute_next_run(now, frequency)
+    frappe.db.sql(
+        "UPDATE `tabAutomation Trigger` SET last_run = %s, next_run = %s WHERE name = %s",
+        (now, next_run, trigger.trigger_name),
+    )
+    frappe.db.commit()
+
+
+def _compute_next_run(current_time, frequency):
+    """Compute the next_run datetime based on frequency."""
+    from datetime import timedelta
+
+    if frequency == "Hourly":
+        return current_time + timedelta(hours=1)
+    elif frequency == "Daily":
+        return current_time + timedelta(days=1)
+    elif frequency == "Weekly":
+        return current_time + timedelta(weeks=1)
+    else:
+        return current_time + timedelta(hours=1)
 
 
 # ---------------------------------------------------------------------------

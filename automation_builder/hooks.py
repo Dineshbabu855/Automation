@@ -26,6 +26,18 @@ doc_events = {
     },
 }
 
+# Scheduler Events
+# ----------------
+# 15-minute interval for Schedule-type triggers. Standard Frappe granularity
+# — per-minute would be over-engineered for this scale.
+scheduler_events = {
+    "cron": {
+        "*/15 * * * *": [
+            "automation_builder.dispatcher.check_scheduled_automations"
+        ],
+    },
+}
+
 # Apps Screen
 # -----------
 add_to_apps_screen = [

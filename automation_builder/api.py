@@ -354,15 +354,21 @@ def get_automation(name):
             })
 
     triggers = []
+    # Only include webhook_token when the user has System Manager role.
+    # Webhook tokens grant external execution access to Published automations,
+    # which is a privilege equivalent to publishing — only System Managers
+    # should see them. Automation Users can edit automations but must not
+    # be able to extract webhook tokens via the API.
+    can_see_token = "System Manager" in frappe.get_roles()
+
     for trigger in doc.triggers:
-        triggers.append({
+        trigger_data = {
             "trigger_type": trigger.trigger_type or "DocType Event",
             "trigger_doctype": trigger.trigger_doctype,
             "trigger_event": trigger.trigger_event,
             "schedule_frequency": trigger.schedule_frequency,
             "next_run": str(trigger.next_run) if trigger.next_run else None,
             "last_run": str(trigger.last_run) if trigger.last_run else None,
-            "webhook_token": trigger.webhook_token,
             "webhook_url_display": trigger.webhook_url_display,
             "condition_logic": trigger.condition_logic or "All must match",
             "conditions": conditions_map.get(trigger.name, []),
@@ -370,7 +376,11 @@ def get_automation(name):
             "condition_field": trigger.condition_field,
             "condition_operator": trigger.condition_operator,
             "condition_value": trigger.condition_value,
-        })
+        }
+        # Only expose webhook_token to System Manager users
+        if can_see_token:
+            trigger_data["webhook_token"] = trigger.webhook_token
+        triggers.append(trigger_data)
 
     return {
         "name": doc.name,
@@ -734,7 +744,7 @@ def webhook_trigger():
     # --- Token lookup (constant-time comparison) ---
     # Find the Automation Trigger row with this token
     trigger_row = frappe.db.sql(
-        """SELECT at.name, at.parent AS automation_name
+        """SELECT at.name, at.parent AS automation_name, at.webhook_token
            FROM `tabAutomation Trigger` at
            INNER JOIN `tabAutomation` a ON a.name = at.parent
            WHERE at.trigger_type = 'Webhook'

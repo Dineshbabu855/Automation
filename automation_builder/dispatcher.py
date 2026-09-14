@@ -659,6 +659,13 @@ def execute_webhook_trigger(automation_name, payload):
         "trigger_doctype": _WEBHOOK_DOCTYPE,
     }
 
+    # Set firing_trigger_name to the index of this Webhook trigger row
+    # so tagged-edge routing works for Webhook triggers too.
+    for t_idx, t_row in enumerate(automation.triggers):
+        if t_row.trigger_type == "Webhook":
+            context["firing_trigger_name"] = str(t_idx)
+            break
+
     trigger_nodes = [n for n in graph.get("nodes", []) if n.get("type") == "trigger"]
     start_id = trigger_nodes[0]["id"] if trigger_nodes else "trigger"
     step_trace = _walk_graph(graph, start_id, context)
@@ -786,6 +793,13 @@ def _execute_schedule_trigger(trigger, now):
 
     # Build context with doc=None — {{trigger.*}} resolves to empty
     context = {"doc": None, "ref_doctype": "", "ref_name": "", "trigger_doctype": ""}
+
+    # Set firing_trigger_name to the index of this Schedule trigger row
+    # so tagged-edge routing works for Schedule triggers too.
+    for t_idx, t_row in enumerate(automation.triggers):
+        if t_row.name == trigger.trigger_name:
+            context["firing_trigger_name"] = str(t_idx)
+            break
 
     trigger_nodes = [n for n in graph.get("nodes", []) if n.get("type") == "trigger"]
     start_id = trigger_nodes[0]["id"] if trigger_nodes else "trigger"

@@ -122,12 +122,7 @@ Every graph node type (Condition, IF, Switch, Action) carries a `trigger_doctype
 | **`"any"`** | The node operates on whichever trigger fired. No skip — always executes. |
 | **Empty / absent** | The node uses the default behavior (matches the run's trigger doctype). |
 
-This config field appears on **Update Field** and **Create Document** action types only
-(confirmed in `update_field.py:11-15`, `create_document.py:11-15`). It is **not** present on
-Send Email, Telegram, HTTP Request, IF, Switch, or Condition nodes.
-
-The dropdown is **only visible** when the automation has more than one trigger row
-(`ActionConfigForm.vue:158-160`).
+This config field appears on **all field-reading action types**: Create Document, Send Email, Update Field, HTTP Request, and Telegram (confirmed in `_SCOPABLE_NODE_TYPES` at `api.py:55`). Condition, IF, and Switch nodes are also scoping-checked in the reachability analysis (`api.py:247-255`) via their own field-inspection logic. The dropdown is **only visible** when the automation has more than one trigger row (`ActionConfigForm.vue:158-160`).
 
 ### Mode 1: Specific doctype (e.g., `"Lead"`)
 

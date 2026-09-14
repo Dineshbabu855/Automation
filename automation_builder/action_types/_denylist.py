@@ -21,6 +21,21 @@ FRAPPE_CORE_DENYLIST = frozenset({
     "UserRole",
 })
 
+# Doctypes that grant code-execution or permission-altering capability
+CODE_EXECUTION_DENYLIST = frozenset({
+    "Server Script",       # Executes Python on the server
+    "Client Script",       # Injects JS into desk pages (XSS-like surface)
+    "Custom Field",        # Modifies any DocType's schema at runtime
+    "Custom Report",       # Can execute arbitrary report scripts
+})
+
+# Governance and workflow doctypes that control business logic
+GOVERNANCE_DENYLIST = frozenset({
+    "Workflow",
+    "Workflow State",
+    "Workflow Action Master",
+})
+
 # This app's own governance doctypes — automations must never modify themselves
 APP_GOVERNANCE_DENYLIST = frozenset({
     "Automation",
@@ -30,7 +45,12 @@ APP_GOVERNANCE_DENYLIST = frozenset({
     "Automation Builder Settings",
 })
 
-DENYLIST = FRAPPE_CORE_DENYLIST | APP_GOVERNANCE_DENYLIST
+DENYLIST = (
+    FRAPPE_CORE_DENYLIST
+    | CODE_EXECUTION_DENYLIST
+    | GOVERNANCE_DENYLIST
+    | APP_GOVERNANCE_DENYLIST
+)
 
 
 def check_denylist(target_doctype):

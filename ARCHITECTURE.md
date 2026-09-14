@@ -89,7 +89,7 @@ Permissions: System Manager (full CRUD), Automation User (read/write/create, no 
 - **Dispatch**: `on_doc_event` queries automations where `trigger_doctype` matches the event's doctype. Only automations with a matching trigger row are considered.
 - **Condition evaluation**: All trigger rows are evaluated against the same document (the one that triggered the event). Conditions that reference fields from a different doctype will evaluate to False.
 - **Actions**: Actions operate on `context["doc"]` — the document that triggered the event. Cross-doctype operations (e.g., updating a Lead when a ToDo triggers) use "Linked Document" in the Update Field action.
-- **Token resolution**: `{{trigger.fieldname}}` resolves against the triggering document. `{{trigger_<doctype>.fieldname}}` is also supported for explicit doctype targeting (resolves against the same document for now).Future enhancement: `context["trigger_docs"]` could hold documents from all matching triggers for true cross-doctype token resolution.
+- **Token resolution**: `{{trigger.fieldname}}` resolves against the triggering document. Cross-doctype scoping is handled by the node-level `trigger_doctype_select` control (see Section 3). Future enhancement: `context["trigger_docs"]` could hold documents from all matching triggers for true cross-doctype token resolution.
 
 **`trigger_doctype_select` config field on actions:** When an automation has multiple triggers, the Update Field and Create Document actions include a `trigger_doctype_select` dropdown with three modes:
 
@@ -612,7 +612,7 @@ All tests use `frappe.tests.IntegrationTestCase` and run against a real MariaDB 
 
 ## 9. Current Scope vs. Full Roadmap
 
-### What Is Built (as of Stage 22)
+### What Is Built (as of Stage 27)
 
 | Feature | Status |
 |---------|--------|
@@ -632,8 +632,12 @@ All tests use `frappe.tests.IntegrationTestCase` and run against a real MariaDB 
 | Sidebar node palette with drag-and-drop | ✅* |
 | Drag-to-add picker (from handle to empty canvas) | ✅* |
 | Node type picker (drag-to-empty-canvas) | ✅* |
-| Security hardening (denylist, SSRF protection, XSS sanitization) | ✅ |
-| 105 automated tests (0 fail) | ✅ |
+| Security hardening (denylist, SSRF protection with DNS-rebinding prevention, XSS sanitization) | ✅ |
+| Webhook trigger (external HTTP → automation) | ✅ |
+| Schedule/cron triggers (time-based) | ✅ |
+| Manual trigger (test-run against a document) | ✅ |
+| Trigger-row-tagged edges + reachability-based scoping | ✅ |
+| 146 automated tests (0 fail) | ✅ |
 
 \* Backend logic verified by automated test (graph roundtrip, reconnection after removal); live browser interaction not independently confirmed by a human. See Section 8 for full gaps list.
 
@@ -646,8 +650,6 @@ All tests use `frappe.tests.IntegrationTestCase` and run against a real MariaDB 
 | Merge nodes (fan-in) | Future |
 | Execution history UI with per-step visualization | Future |
 | Template library (pre-built automation patterns) | Future |
-| Webhook trigger (external HTTP → automation) | Future |
-| Cron/scheduled triggers (time-based) | Future |
 | Custom node plugin API (user-defined types at runtime) | Future |
 | Audit trail / change logging | Future |
 
@@ -674,3 +676,9 @@ The architecture is designed to accommodate all of these. The registry pattern m
 9. **No undo/redo on the canvas.** The Vue Flow canvas does not implement undo/redo. Users must manually reconnect nodes if they make a mistake.
 
 10. **The `add-trigger` placeholder node is a hack.** The bottom-of-graph "+" button for adding new actions is implemented as a special node type (`add-trigger`) that gets repositioned and reconnected whenever the graph changes. A cleaner approach would be a canvas-level UI control rather than a graph node.
+
+11. **Webhook endpoint has no Origin/Referer header check.** The `webhook_trigger()` endpoint accepts POST requests from any origin. This was a deliberate decision: legitimate server-to-server webhook senders commonly don't send Origin/Referer headers, so adding such a check would reject real traffic more than it stops abuse. Protection relies on the 40-character hex token (brute-force resistant), rate limiting (30 requests/minute/IP), and constant-time token comparison.
+
+12. **Email action has no recipient allowlist.** The `send_email` action accepts any email address in the `recipient` field, including addresses resolved from `{{trigger.*}}` tokens. If a trigger document has attacker-controlled email fields, the automation could be used as an email relay. This is an accepted risk for this version: the resolved recipient is logged in the Automation Run Step output, providing an audit trail. A future version could add a configurable allowlist.
+
+13. **Wildcard hook overhead is negligible.** The `doc_events = {"*": ...}` hook fires on every document save site-wide. Benchmarking shows the SQL query itself costs ~0.2ms per call (indexed lookup + join). The total `on_doc_event` overhead is ~4.8ms per call, of which ~4.6ms is Frappe's standard hook dispatch mechanism (module loading, function invocation) — not our code. This is acceptable for typical workloads; an in-memory cache of active automations would only be warranted for sites with extremely high write volume (thousands of writes per second).

@@ -1183,3 +1183,171 @@ class TestStage26_5CategoryF(IntegrationTestCase):
             _create_and_publish(auto_name, nodes, edges, triggers)
 
         self._cleanup_auto(auto_name)
+
+
+class TestStage26_5Gap4ScheduleTick(IntegrationTestCase):
+    """Gap 4 — Schedule trigger tick through full tagged-edge routing chain."""
+
+    def _cleanup_auto(self, name):
+        if frappe.db.exists("Automation", name):
+            frappe.delete_doc("Automation", name, force=True)
+
+    def test_schedule_tick_routes_via_tagged_edge(self):
+        """Schedule trigger (row 0) + DocType Event (row 1), each tagged to own edge.
+        Force next_run into the past, invoke check_scheduled_automations() for real.
+        Confirm only the schedule path fires through the full tick -> execute chain."""
+        auto_name = "ST26.5-D4-ScheduleTickTagged"
+        self._cleanup_auto(auto_name)
+        for n in frappe.get_all("Note", filters={"title": ["in", ["SCHEDULE-FIRED", "EVENT-FIRED"]]}):
+            frappe.delete_doc("Note", n.name, force=True)
+        frappe.db.commit()
+
+        nodes = [
+            _make_trigger_node(),
+            _make_action_node("act-schedule", "create_document", {
+                "target_doctype": "Note", "field_mapping": [
+                    {"target_field": "title", "source_value": "SCHEDULE-FIRED"},
+                ],
+            }),
+            _make_action_node("act-event", "create_document", {
+                "target_doctype": "Note", "field_mapping": [
+                    {"target_field": "title", "source_value": "EVENT-FIRED"},
+                ],
+            }),
+        ]
+        edges = [
+            _edge("trigger", "act-schedule", applies_to=["0"]),
+            _edge("trigger", "act-event", applies_to=["1"]),
+        ]
+        triggers = [
+            _make_trigger("ToDo", trigger_type="Schedule", schedule_frequency="Hourly"),
+            _make_trigger("Lead", "On Update", trigger_type="DocType Event"),
+        ]
+        name = _create_and_publish(auto_name, nodes, edges, triggers)
+
+        # Force next_run into the past so check_scheduled_automations picks it up
+        auto = frappe.get_doc("Automation", name)
+        schedule_row = auto.triggers[0]
+        two_hours_ago = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-2)
+        frappe.db.sql(
+            "UPDATE `tabAutomation Trigger` SET next_run = %s WHERE name = %s",
+            (two_hours_ago, schedule_row.name),
+        )
+        frappe.db.commit()
+
+        # Invoke the real scheduler tick
+        from automation_builder.dispatcher import check_scheduled_automations
+        check_scheduled_automations()
+
+        # Verify: SCHEDULE-FIRED Note should exist
+        notes = frappe.get_all("Note", filters={"title": "SCHEDULE-FIRED"}, limit=5)
+        self.assertTrue(len(notes) >= 1,
+                        "SCHEDULE-FIRED Note should be created by schedule tick")
+
+        # Verify: EVENT-FIRED Note should NOT exist (DocType Event path not fired)
+        bad_notes = frappe.get_all("Note", filters={"title": "EVENT-FIRED"}, limit=5)
+        self.assertEqual(len(bad_notes), 0,
+                         "EVENT-FIRED Note should NOT be created by schedule tick")
+
+        # Verify: Automation Run has trigger_source='Schedule'
+        runs = frappe.get_all("Automation Run",
+                              filters={"automation": name},
+                              fields=["name", "trigger_source", "status"],
+                              order_by="creation desc", limit=1)
+        self.assertTrue(len(runs) >= 1, "Run should be created")
+        self.assertEqual(runs[0].trigger_source, "Schedule")
+        self.assertEqual(runs[0].status, "Success")
+
+        self._cleanup_auto(auto_name)
+
+
+class TestStage26_5Gap5WebhookHttpPost(IntegrationTestCase):
+    """Gap 5 — Webhook trigger fired through the real endpoint with tagged edges."""
+
+    def _cleanup_auto(self, name):
+        if frappe.db.exists("Automation", name):
+            frappe.delete_doc("Automation", name, force=True)
+
+    def test_webhook_endpoint_routes_via_tagged_edge(self):
+        """Webhook (row 0) tagged to act-webhook, DocType Event (row 1) tagged to act-event.
+        Fire via the real webhook_trigger() endpoint with a valid token.
+        Confirm only the webhook path fires — no cross-fire."""
+        auto_name = "ST26.5-D5-WebhookHttpPost"
+        self._cleanup_auto(auto_name)
+        for n in frappe.get_all("Note", filters={"title": ["in", ["WEBHOOK-FIRED", "EVENT-FIRED"]]}):
+            frappe.delete_doc("Note", n.name, force=True)
+        frappe.db.commit()
+
+        webhook_token = secrets.token_hex(32)
+        nodes = [
+            _make_trigger_node(),
+            _make_action_node("act-webhook", "create_document", {
+                "target_doctype": "Note", "field_mapping": [
+                    {"target_field": "title", "source_value": "WEBHOOK-FIRED"},
+                ],
+            }),
+            _make_action_node("act-event", "create_document", {
+                "target_doctype": "Note", "field_mapping": [
+                    {"target_field": "title", "source_value": "EVENT-FIRED"},
+                ],
+            }),
+        ]
+        edges = [
+            _edge("trigger", "act-webhook", applies_to=["0"]),
+            _edge("trigger", "act-event", applies_to=["1"]),
+        ]
+        triggers = [
+            _make_trigger("", trigger_type="Webhook", webhook_token=webhook_token),
+            _make_trigger("Lead", "On Update", trigger_type="DocType Event"),
+        ]
+        name = _create_and_publish(auto_name, nodes, edges, triggers)
+
+        # Set up request context for webhook_trigger()
+        saved_form_dict = getattr(frappe.local, "form_dict", {})
+        saved_request = getattr(frappe.local, "request", None)
+        saved_response = getattr(frappe.local, "response", None)
+        try:
+            frappe.local.form_dict = frappe._dict(token=webhook_token)
+            frappe.local.request = frappe._dict(
+                data=json.dumps({"source": "test"}),
+                content_length=20,
+            )
+            frappe.local.response = {}
+
+            # Mock frappe.enqueue to run synchronously
+            from automation_builder.dispatcher import execute_webhook_trigger
+            with patch("automation_builder.api.frappe.enqueue",
+                        side_effect=lambda method, **kw: execute_webhook_trigger(
+                            automation_name=kw["automation_name"],
+                            payload=kw["payload"],
+                        )):
+                from automation_builder.api import webhook_trigger
+                result = webhook_trigger()
+
+            self.assertEqual(result.get("status"), "queued")
+
+        finally:
+            frappe.local.form_dict = saved_form_dict
+            frappe.local.request = saved_request
+            frappe.local.response = saved_response
+
+        # Verify: WEBHOOK-FIRED Note should exist
+        notes = frappe.get_all("Note", filters={"title": "WEBHOOK-FIRED"}, limit=5)
+        self.assertTrue(len(notes) >= 1,
+                        "WEBHOOK-FIRED Note should be created by webhook")
+
+        # Verify: EVENT-FIRED Note should NOT exist (DocType Event path not fired)
+        bad_notes = frappe.get_all("Note", filters={"title": "EVENT-FIRED"}, limit=5)
+        self.assertEqual(len(bad_notes), 0,
+                         "EVENT-FIRED Note should NOT be created by webhook")
+
+        # Verify: Automation Run has trigger_source='Webhook'
+        runs = frappe.get_all("Automation Run",
+                              filters={"automation": name},
+                              fields=["name", "trigger_source", "status"],
+                              order_by="creation desc", limit=1)
+        self.assertTrue(len(runs) >= 1, "Run should be created")
+        self.assertEqual(runs[0].trigger_source, "Webhook")
+        self.assertEqual(runs[0].status, "Success")
+
+        self._cleanup_auto(auto_name)

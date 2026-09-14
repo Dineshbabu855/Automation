@@ -49,3 +49,11 @@ export function saveEmailTemplate(data) {
 export function canPublish() {
   return call('can_publish')
 }
+
+export function runAutomationManually(data) {
+  return call('run_automation_manually', data)
+}
+
+export function searchDocuments(doctype, query) {
+  return call('search_documents', { doctype, query })
+}

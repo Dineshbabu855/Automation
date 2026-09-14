@@ -29,6 +29,11 @@
           </button>
         </div>
         <div class="ab-topbar-actions">
+          <button
+            v-if="hasManualTrigger && automationId"
+            class="ab-btn ab-btn-ghost ab-btn-sm"
+            @click="openRunNowModal"
+          >Run Now</button>
           <button class="ab-btn ab-btn-ghost ab-btn-sm" @click="showRuns" v-if="automationId">Run History</button>
           <button class="ab-btn ab-btn-primary ab-btn-sm" @click="save" :disabled="saving">
             {{ saving ? 'Saving...' : 'Save' }}
@@ -262,6 +267,54 @@
         @remove-action="removeActionNode"
       />
     </div>
+
+    <!-- Run Now Modal (Manual Trigger) -->
+    <div v-if="showRunNowModal" class="ab-modal-overlay" @click.self="closeRunNowModal">
+      <div class="ab-modal">
+        <h3>Run Now — {{ runNowDoctype }}</h3>
+        <div class="ab-modal-body">
+          <div class="ab-config-group">
+            <label>Search Documents</label>
+            <input
+              v-model="runNowQuery"
+              type="text"
+              placeholder="Type to search..."
+              @input="searchRunNowDocs"
+            />
+          </div>
+          <div v-if="runNowDocs.length" class="ab-runnow-list">
+            <div
+              v-for="doc in runNowDocs"
+              :key="doc.name"
+              class="ab-runnow-item"
+              :class="{ 'ab-runnow-item-selected': runNowSelectedDoc === doc.name }"
+              @click="runNowSelectedDoc = doc.name"
+            >
+              {{ doc.label }}
+              <span class="ab-runnow-item-id">{{ doc.name }}</span>
+            </div>
+          </div>
+          <div v-else-if="runNowQuery" class="ab-runnow-empty">No documents found</div>
+        </div>
+        <div class="ab-modal-footer">
+          <button class="ab-btn ab-btn-ghost" @click="closeRunNowModal">Cancel</button>
+          <button
+            class="ab-btn ab-btn-primary"
+            :disabled="!runNowSelectedDoc || runNowLoading"
+            @click="executeRunNow"
+          >
+            {{ runNowLoading ? 'Running...' : 'Execute' }}
+          </button>
+        </div>
+        <div v-if="runNowResult" class="ab-runnow-result">
+          <span :class="'ab-runnow-status-' + runNowResult.status">
+            {{ runNowResult.status }}
+          </span>
+          <span v-if="runNowResult.error">{{ runNowResult.error }}</span>
+          <span v-else-if="runNowResult.output">{{ runNowResult.output }}</span>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -273,7 +326,7 @@ import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import ConfigPanel from '../components/ConfigPanel.vue'
 import NodePalette from '../components/NodePalette.vue'
-import { getAutomation, saveAutomation, getActionTypes, canPublish as checkCanPublish } from '../composables/api.js'
+import { getAutomation, saveAutomation, getActionTypes, canPublish as checkCanPublish, runAutomationManually, searchDocuments } from '../composables/api.js'
 
 import '@vue-flow/controls/dist/style.css'
 
@@ -295,6 +348,19 @@ const logicTypes = computed(() => {
   return actionTypes.value.filter(at => at.node_category === 'logic')
 })
 
+// Run Now (Manual Trigger) state
+const showRunNowModal = ref(false)
+const runNowDoctype = ref('')
+const runNowQuery = ref('')
+const runNowDocs = ref([])
+const runNowSelectedDoc = ref('')
+const runNowResult = ref(null)
+const runNowLoading = ref(false)
+
+const hasManualTrigger = computed(() => {
+  return nodes.value.some(n => n.type === 'trigger' && n.data?.trigger_type === 'Manual')
+})
+
 // Type picker state (for drag-to-empty-canvas)
 const pickerVisible = ref(false)
 const pickerPosition = ref({ x: 0, y: 0 })
@@ -307,8 +373,10 @@ const nodes = ref([
     type: 'trigger',
     position: { x: 250, y: 50 },
     data: {
+      trigger_type: 'DocType Event',
       trigger_doctype: '',
       trigger_event: 'On Update',
+      schedule_frequency: 'Hourly',
     },
   },
   {
@@ -522,6 +590,52 @@ function toggleAddMenu(nodeId) {
 
 function closeAddMenu() {
   showAddMenu.value = null
+}
+
+// Run Now (Manual Trigger) functions
+function openRunNowModal() {
+  const triggerNode = nodes.value.find(n => n.type === 'trigger' && n.data?.trigger_type === 'Manual')
+  if (!triggerNode) return
+  runNowDoctype.value = triggerNode.data.trigger_doctype
+  runNowQuery.value = ''
+  runNowDocs.value = []
+  runNowSelectedDoc.value = ''
+  runNowResult.value = null
+  showRunNowModal.value = true
+}
+
+async function searchRunNowDocs() {
+  if (!runNowDoctype.value) return
+  try {
+    runNowDocs.value = await searchDocuments(runNowDoctype.value, runNowQuery.value)
+  } catch (e) {
+    console.error(e)
+    runNowDocs.value = []
+  }
+}
+
+async function executeRunNow() {
+  if (!runNowSelectedDoc.value) return
+  runNowLoading.value = true
+  runNowResult.value = null
+  try {
+    const result = await runAutomationManually({
+      automation_name: automationId.value,
+      reference_doctype: runNowDoctype.value,
+      reference_name: runNowSelectedDoc.value,
+    })
+    runNowResult.value = result
+  } catch (e) {
+    console.error(e)
+    runNowResult.value = { status: 'Failed', error: e.message || 'Unknown error' }
+  } finally {
+    runNowLoading.value = false
+  }
+}
+
+function closeRunNowModal() {
+  showRunNowModal.value = false
+  runNowResult.value = null
 }
 
 function isValidConnection(params) {
@@ -823,8 +937,10 @@ async function save() {
     for (const trigger of triggerNodes) {
       if (!trigger.data?.trigger_doctype) continue
       triggers.push({
+        trigger_type: trigger.data.trigger_type || 'DocType Event',
         trigger_doctype: trigger.data.trigger_doctype,
         trigger_event: trigger.data.trigger_event || 'On Update',
+        schedule_frequency: trigger.data.schedule_frequency || 'Hourly',
         condition_logic: trigger.data.condition_logic || 'All must match',
         conditions: trigger.data.conditions || [],
       })
@@ -1065,5 +1181,93 @@ onBeforeUnmount(() => {
 .ab-status-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Run Now modal */
+.ab-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.ab-modal {
+  background: white;
+  border-radius: 12px;
+  padding: 24px;
+  min-width: 420px;
+  max-width: 560px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+}
+.ab-modal h3 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--gray-900);
+}
+.ab-modal-body {
+  margin-bottom: 16px;
+}
+.ab-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.ab-runnow-list {
+  max-height: 240px;
+  overflow-y: auto;
+  margin-top: 8px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+}
+.ab-runnow-item {
+  padding: 10px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--gray-100);
+}
+.ab-runnow-item:last-child {
+  border-bottom: none;
+}
+.ab-runnow-item:hover {
+  background: var(--gray-50);
+}
+.ab-runnow-item-selected {
+  background: var(--blue-50) !important;
+  color: var(--blue-600);
+}
+.ab-runnow-item-id {
+  color: var(--gray-400);
+  font-size: 12px;
+}
+.ab-runnow-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--gray-400);
+  font-size: 13px;
+}
+.ab-runnow-result {
+  margin-top: 16px;
+  padding: 10px 12px;
+  background: var(--gray-50);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.ab-runnow-status-Success {
+  color: var(--green-600);
+  font-weight: 600;
+}
+.ab-runnow-status-Failed {
+  color: var(--red-600);
+  font-weight: 600;
+}
+.ab-runnow-status-Skipped {
+  color: var(--gray-500);
+  font-weight: 600;
 }
 </style>

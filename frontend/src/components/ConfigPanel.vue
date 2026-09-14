@@ -8,19 +8,41 @@
     <!-- Trigger Config -->
     <template v-if="nodeType === 'trigger'">
       <div class="ab-config-group">
+        <label>Trigger Type</label>
+        <select v-model="local.trigger_type">
+          <option value="DocType Event">DocType Event</option>
+          <option value="Manual">Manual (Run Now)</option>
+          <option value="Schedule">Schedule</option>
+        </select>
+        <p v-if="local.trigger_type === 'Manual'" class="ab-config-hint">
+          User clicks "Run Now" and picks a document to test against.
+        </p>
+        <p v-else-if="local.trigger_type === 'Schedule'" class="ab-config-hint">
+          Fires automatically on a time interval. No triggering document.
+        </p>
+      </div>
+      <div class="ab-config-group">
         <label>DocType</label>
         <select v-model="local.trigger_doctype" @change="onDocTypeChange">
           <option value="">Select DocType</option>
           <option v-for="dt in doctypes" :key="dt.name" :value="dt.name">{{ dt.name }}</option>
         </select>
       </div>
-      <div class="ab-config-group">
+      <div v-if="local.trigger_type === 'DocType Event'" class="ab-config-group">
         <label>Event</label>
         <select v-model="local.trigger_event">
           <option>After Insert</option>
           <option>On Update</option>
           <option>On Submit</option>
           <option>On Cancel</option>
+        </select>
+      </div>
+      <div v-if="local.trigger_type === 'Schedule'" class="ab-config-group">
+        <label>Frequency</label>
+        <select v-model="local.schedule_frequency">
+          <option value="Hourly">Hourly</option>
+          <option value="Daily">Daily</option>
+          <option value="Weekly">Weekly</option>
         </select>
       </div>
     </template>

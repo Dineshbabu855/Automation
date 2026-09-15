@@ -141,21 +141,22 @@ class TestStage25Scoping(IntegrationTestCase):
             {"trigger_type": "DocType Event", "trigger_doctype": "Lead"},
         ])
 
-        # With trigger nodes + edges → action IS reachable from both → rejected
+        # Canonical shape (real save() output): trigger rows carry graph_node_id.
+        # Both trigger nodes reach the unscoped action → 2 distinct doctypes → rejected
         try:
             _validate_scoping_for_multi_doctype(json.dumps({
                 "nodes": [
-                    {"id": "t1", "type": "trigger", "position": {"x": 0, "y": 0}, "data": {"trigger_doctype": ""}},
-                    {"id": "t2", "type": "trigger", "position": {"x": 300, "y": 0}, "data": {"trigger_doctype": "Lead"}},
+                    {"id": "t1", "type": "trigger", "position": {"x": 0, "y": 0}, "data": {"trigger_type": "Webhook", "trigger_doctype": ""}},
+                    {"id": "t2", "type": "trigger", "position": {"x": 300, "y": 0}, "data": {"trigger_type": "DocType Event", "trigger_doctype": "Lead"}},
                     {"id": "a1", "type": "action", "position": {"x": 150, "y": 100}, "data": {"action_type": "send_email", "trigger_doctype_select": ""}},
                 ],
                 "edges": [
-                    {"source": "t1", "target": "a1"},
-                    {"source": "t2", "target": "a1"},
+                    {"source": "t1", "target": "a1", "sourceHandle": "t1-out", "targetHandle": "a1-in", "type": "smoothstep"},
+                    {"source": "t2", "target": "a1", "sourceHandle": "t2-out", "targetHandle": "a1-in-left", "type": "smoothstep"},
                 ],
             }), [
-                {"trigger_type": "Webhook", "trigger_doctype": ""},
-                {"trigger_type": "DocType Event", "trigger_doctype": "Lead"},
+                {"trigger_type": "Webhook", "trigger_doctype": "", "graph_node_id": "t1"},
+                {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "graph_node_id": "t2"},
             ])
             self.fail("Should have raised ValidationError")
         except frappe.ValidationError as e:
@@ -163,11 +164,28 @@ class TestStage25Scoping(IntegrationTestCase):
 
     def test_webhook_plus_doctype_event_scoped_accepted(self):
         """Webhook + DocType Event with explicit scoping — accepted."""
+        # Canonical shape: unscoped-by-position but scoped action unreachable from triggers → OK;
+        # and a scoped action reachable from both triggers → OK
         _validate_scoping_for_multi_doctype(json.dumps({
             "nodes": [{"id": "a1", "type": "action", "data": {"action_type": "send_email", "trigger_doctype_select": "Lead"}}]
         }), [
             {"trigger_type": "Webhook", "trigger_doctype": ""},
             {"trigger_type": "DocType Event", "trigger_doctype": "Lead"},
+        ])
+
+        _validate_scoping_for_multi_doctype(json.dumps({
+            "nodes": [
+                {"id": "t1", "type": "trigger", "position": {"x": 0, "y": 0}, "data": {"trigger_type": "Webhook", "trigger_doctype": ""}},
+                {"id": "t2", "type": "trigger", "position": {"x": 300, "y": 0}, "data": {"trigger_type": "DocType Event", "trigger_doctype": "Lead"}},
+                {"id": "a1", "type": "action", "position": {"x": 150, "y": 100}, "data": {"action_type": "send_email", "trigger_doctype_select": "Lead"}},
+            ],
+            "edges": [
+                {"source": "t1", "target": "a1", "sourceHandle": "t1-out", "targetHandle": "a1-in", "type": "smoothstep"},
+                {"source": "t2", "target": "a1", "sourceHandle": "t2-out", "targetHandle": "a1-in-left", "type": "smoothstep"},
+            ],
+        }), [
+            {"trigger_type": "Webhook", "trigger_doctype": "", "graph_node_id": "t1"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "graph_node_id": "t2"},
         ])
 
     def test_webhook_plus_manual_rejected(self):
@@ -180,21 +198,21 @@ class TestStage25Scoping(IntegrationTestCase):
             {"trigger_type": "Manual", "trigger_doctype": "ToDo"},
         ])
 
-        # With trigger nodes + edge → reachable from both → rejected
+        # Canonical shape: both trigger nodes reach the unscoped action → rejected
         try:
             _validate_scoping_for_multi_doctype(json.dumps({
                 "nodes": [
-                    {"id": "t1", "type": "trigger", "position": {"x": 0, "y": 0}, "data": {"trigger_doctype": ""}},
-                    {"id": "t2", "type": "trigger", "position": {"x": 300, "y": 0}, "data": {"trigger_doctype": "ToDo"}},
+                    {"id": "t1", "type": "trigger", "position": {"x": 0, "y": 0}, "data": {"trigger_type": "Webhook", "trigger_doctype": ""}},
+                    {"id": "t2", "type": "trigger", "position": {"x": 300, "y": 0}, "data": {"trigger_type": "Manual", "trigger_doctype": "ToDo"}},
                     {"id": "a1", "type": "action", "position": {"x": 150, "y": 100}, "data": {"action_type": "send_email", "trigger_doctype_select": ""}},
                 ],
                 "edges": [
-                    {"source": "t1", "target": "a1"},
-                    {"source": "t2", "target": "a1"},
+                    {"source": "t1", "target": "a1", "sourceHandle": "t1-out", "targetHandle": "a1-in", "type": "smoothstep"},
+                    {"source": "t2", "target": "a1", "sourceHandle": "t2-out", "targetHandle": "a1-in-left", "type": "smoothstep"},
                 ],
             }), [
-                {"trigger_type": "Webhook", "trigger_doctype": ""},
-                {"trigger_type": "Manual", "trigger_doctype": "ToDo"},
+                {"trigger_type": "Webhook", "trigger_doctype": "", "graph_node_id": "t1"},
+                {"trigger_type": "Manual", "trigger_doctype": "ToDo", "graph_node_id": "t2"},
             ])
             self.fail("Should have raised ValidationError")
         except frappe.ValidationError as e:

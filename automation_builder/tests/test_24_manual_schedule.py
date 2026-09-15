@@ -33,22 +33,29 @@ class TestStage24MigrationRegression(IntegrationTestCase):
     """Verify migration sets trigger_type='DocType Event' on existing rows."""
 
     def test_existing_trigger_rows_have_doc_type_event(self):
-        """All existing Automation Trigger rows should have trigger_type='DocType Event' after migration."""
+        """All existing Automation Trigger rows should have a valid trigger_type.
+
+        Post-Stage 24/25 the site legitimately contains DocType Event, Webhook,
+        and Schedule trigger rows. DocType Event rows must carry a doc-event
+        value; Webhook/Schedule rows have no trigger_event.
+        """
         triggers = frappe.get_all(
             "Automation Trigger",
             fields=["name", "trigger_type", "trigger_event"],
         )
+        valid_types = ("DocType Event", "Webhook", "Schedule", "Manual")
         for t in triggers:
-            self.assertEqual(
-                t.trigger_type,
-                "DocType Event",
-                f"Trigger {t.name} should have trigger_type='DocType Event', got '{t.trigger_type}'",
-            )
-            # Existing triggers should still have their original event
             self.assertIn(
-                t.trigger_event,
-                ["After Insert", "On Update", "On Submit", "On Cancel"],
+                t.trigger_type,
+                valid_types,
+                f"Trigger {t.name} has invalid trigger_type '{t.trigger_type}'",
             )
+            if t.trigger_type == "DocType Event":
+                # DocType Event rows should still have their original event
+                self.assertIn(
+                    t.trigger_event,
+                    ["After Insert", "On Update", "On Submit", "On Cancel"],
+                )
 
     def test_trigger_type_field_exists(self):
         """Automation Trigger should have a trigger_type field."""
@@ -224,84 +231,107 @@ class TestStage24TokenResolution(IntegrationTestCase):
 
 
 class TestStage26ReachabilityScoping(IntegrationTestCase):
-    """Verify reachability-based scoping replaces blanket doctype-count."""
+    """Verify forward-walk scoping with the canonical multi-Trigger-node shape.
+
+    Canonical design (Stage 29): one Trigger node per trigger row, each with
+    its own outgoing edge. graph_node_id links rows to nodes.
+    """
 
     def test_separate_chains_no_ambiguity(self):
-        """Two separate chains from Trigger node with tagged edges:
+        """Two Trigger nodes, each with its own chain:
         Lead chain and ToDo chain are independent — no scoping needed."""
         from automation_builder.api import _validate_scoping_for_multi_doctype
 
         graph = {
             "nodes": [
-                {"id": "trigger", "type": "trigger", "position": {"x": 250, "y": 50},
-                 "data": {"trigger_doctype": "", "trigger_event": "On Update"}},
+                {"id": "trigger-lead", "type": "trigger", "position": {"x": 100, "y": 50},
+                 "data": {"trigger_doctype": "Lead", "trigger_event": "On Update"}},
+                {"id": "trigger-todo", "type": "trigger", "position": {"x": 400, "y": 50},
+                 "data": {"trigger_doctype": "ToDo", "trigger_event": "On Update"}},
                 {"id": "action-lead", "type": "action", "position": {"x": 100, "y": 200},
                  "data": {"action_type": "send_email", "trigger_doctype_select": ""}},
                 {"id": "action-todo", "type": "action", "position": {"x": 400, "y": 200},
                  "data": {"action_type": "send_email", "trigger_doctype_select": ""}},
             ],
             "edges": [
-                {"id": "e-1", "source": "trigger", "target": "action-lead",
-                 "sourceHandle": "trigger-out", "type": "smoothstep",
-                 "applies_to_triggers": ["0"]},
-                {"id": "e-2", "source": "trigger", "target": "action-todo",
-                 "sourceHandle": "trigger-out", "type": "smoothstep",
-                 "applies_to_triggers": ["1"]},
+                {"id": "e-1", "source": "trigger-lead", "target": "action-lead",
+                 "sourceHandle": "trigger-lead-out", "targetHandle": "action-lead-in",
+                 "type": "smoothstep"},
+                {"id": "e-2", "source": "trigger-todo", "target": "action-todo",
+                 "sourceHandle": "trigger-todo-out", "targetHandle": "action-todo-in",
+                 "type": "smoothstep"},
             ],
         }
         triggers = [
-            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update"},
-            {"trigger_type": "DocType Event", "trigger_doctype": "ToDo", "trigger_event": "On Update"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update",
+             "graph_node_id": "trigger-lead"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "ToDo", "trigger_event": "On Update",
+             "graph_node_id": "trigger-todo"},
         ]
-        # Should NOT raise — tagged edges route to separate chains
+        # Should NOT raise — each action is reachable from only one doctype
         _validate_scoping_for_multi_doctype(json.dumps(graph), triggers)
 
-    def test_tagged_edges_narrow_reachability(self):
-        """Edges with applies_to_triggers restrict which trigger rows reach downstream."""
+    def test_separate_chains_narrow_reachability(self):
+        """Reachability is per-chain: an unscoped action on ONE trigger's chain
+        is fine even when the other chain also has actions."""
         from automation_builder.api import _validate_scoping_for_multi_doctype
 
         graph = {
             "nodes": [
-                {"id": "trigger", "type": "trigger", "position": {"x": 250, "y": 50},
-                 "data": {"trigger_doctype": "", "trigger_event": "On Update"}},
-                {"id": "action-1", "type": "action", "position": {"x": 250, "y": 200},
+                {"id": "trigger-lead", "type": "trigger", "position": {"x": 100, "y": 50},
+                 "data": {"trigger_doctype": "Lead", "trigger_event": "On Update"}},
+                {"id": "trigger-todo", "type": "trigger", "position": {"x": 400, "y": 50},
+                 "data": {"trigger_doctype": "ToDo", "trigger_event": "On Update"}},
+                {"id": "action-1", "type": "action", "position": {"x": 100, "y": 200},
                  "data": {"action_type": "send_email", "trigger_doctype_select": ""}},
-                {"id": "action-2", "type": "action", "position": {"x": 250, "y": 350},
+                {"id": "action-2", "type": "action", "position": {"x": 400, "y": 200},
                  "data": {"action_type": "create_document", "trigger_doctype_select": ""}},
             ],
             "edges": [
-                {"id": "e-1", "source": "trigger", "target": "action-1",
-                 "type": "smoothstep", "applies_to_triggers": ["0"]},
-                {"id": "e-2", "source": "trigger", "target": "action-2",
-                 "type": "smoothstep", "applies_to_triggers": ["1"]},
+                {"id": "e-1", "source": "trigger-lead", "target": "action-1",
+                 "sourceHandle": "trigger-lead-out", "targetHandle": "action-1-in",
+                 "type": "smoothstep"},
+                {"id": "e-2", "source": "trigger-todo", "target": "action-2",
+                 "sourceHandle": "trigger-todo-out", "targetHandle": "action-2-in",
+                 "type": "smoothstep"},
             ],
         }
         triggers = [
-            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update"},
-            {"trigger_type": "DocType Event", "trigger_doctype": "ToDo", "trigger_event": "On Update"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update",
+             "graph_node_id": "trigger-lead"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "ToDo", "trigger_event": "On Update",
+             "graph_node_id": "trigger-todo"},
         ]
         # Each action is reachable from only ONE trigger row — no ambiguity
         _validate_scoping_for_multi_doctype(json.dumps(graph), triggers)
 
     def test_shared_chain_needs_scoping(self):
-        """When both trigger rows reach the same unscoped action, rejection is correct."""
+        """When both Trigger nodes reach the same unscoped action, rejection is correct."""
         from automation_builder.api import _validate_scoping_for_multi_doctype
 
         graph = {
             "nodes": [
-                {"id": "trigger", "type": "trigger", "position": {"x": 250, "y": 50},
-                 "data": {"trigger_doctype": "", "trigger_event": "On Update"}},
+                {"id": "trigger-lead", "type": "trigger", "position": {"x": 100, "y": 50},
+                 "data": {"trigger_doctype": "Lead", "trigger_event": "On Update"}},
+                {"id": "trigger-todo", "type": "trigger", "position": {"x": 400, "y": 50},
+                 "data": {"trigger_doctype": "ToDo", "trigger_event": "On Update"}},
                 {"id": "action-1", "type": "action", "position": {"x": 250, "y": 200},
                  "data": {"action_type": "send_email", "trigger_doctype_select": ""}},
             ],
             "edges": [
-                {"id": "e-1", "source": "trigger", "target": "action-1",
+                {"id": "e-1", "source": "trigger-lead", "target": "action-1",
+                 "sourceHandle": "trigger-lead-out", "targetHandle": "action-1-in",
+                 "type": "smoothstep"},
+                {"id": "e-2", "source": "trigger-todo", "target": "action-1",
+                 "sourceHandle": "trigger-todo-out", "targetHandle": "action-1-in-left",
                  "type": "smoothstep"},
             ],
         }
         triggers = [
-            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update"},
-            {"trigger_type": "DocType Event", "trigger_doctype": "ToDo", "trigger_event": "On Update"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update",
+             "graph_node_id": "trigger-lead"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "ToDo", "trigger_event": "On Update",
+             "graph_node_id": "trigger-todo"},
         ]
         self.assertRaises(
             frappe.ValidationError,
@@ -316,145 +346,58 @@ class TestStage26ReachabilityScoping(IntegrationTestCase):
 
         graph = {
             "nodes": [
-                {"id": "trigger", "type": "trigger", "position": {"x": 250, "y": 50},
-                 "data": {"trigger_doctype": "", "trigger_event": "On Update"}},
+                {"id": "trigger-lead", "type": "trigger", "position": {"x": 100, "y": 50},
+                 "data": {"trigger_doctype": "Lead", "trigger_event": "On Update"}},
+                {"id": "trigger-todo", "type": "trigger", "position": {"x": 400, "y": 50},
+                 "data": {"trigger_doctype": "ToDo", "trigger_event": "On Update"}},
                 {"id": "action-orphan", "type": "action", "position": {"x": 500, "y": 200},
                  "data": {"action_type": "send_email", "trigger_doctype_select": ""}},
             ],
             "edges": [],
         }
         triggers = [
-            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update"},
-            {"trigger_type": "DocType Event", "trigger_doctype": "ToDo", "trigger_event": "On Update"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update",
+             "graph_node_id": "trigger-lead"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "ToDo", "trigger_event": "On Update",
+             "graph_node_id": "trigger-todo"},
         ]
         _validate_scoping_for_multi_doctype(json.dumps(graph), triggers)
 
     def test_convergence_two_edges_different_rows_rejected(self):
-        """Regression: applies_to_triggers values are strings but idx is int.
-
-        Two edges from trigger to the same action, each tagged to a different
-        trigger row (e.g. ["0"] and ["1"]). Both rows can reach the action,
-        so it should be flagged as unscoped convergence. Previously failed
-        because ``0 in ["0"]`` is False in Python.
-        """
+        """Two Trigger nodes converge on the same unscoped action via separate
+        edges. Both rows can reach the action, so it is flagged as unscoped
+        convergence (the canonical equivalent of the old tagged-edge case)."""
         from automation_builder.api import _validate_scoping_for_multi_doctype
 
         graph = {
             "nodes": [
-                {"id": "trigger", "type": "trigger", "position": {"x": 250, "y": 50},
-                 "data": {"trigger_doctype": "", "trigger_event": "On Update"}},
-                {"id": "act-shared", "type": "action", "position": {"x": 0, "y": 0},
+                {"id": "trigger-lead", "type": "trigger", "position": {"x": 100, "y": 50},
+                 "data": {"trigger_doctype": "Lead", "trigger_event": "On Update"}},
+                {"id": "trigger-todo", "type": "trigger", "position": {"x": 400, "y": 50},
+                 "data": {"trigger_doctype": "ToDo", "trigger_event": "On Update"}},
+                {"id": "act-shared", "type": "action", "position": {"x": 250, "y": 200},
                  "data": {"action_type": "create_document", "trigger_doctype_select": "",
                           "target_doctype": "Note", "field_mapping": []}},
             ],
             "edges": [
-                {"id": "e-0", "source": "trigger", "target": "act-shared",
-                 "sourceHandle": "trigger-out", "targetHandle": "act-shared-in-0",
-                 "type": "smoothstep", "applies_to_triggers": ["0"]},
-                {"id": "e-1", "source": "trigger", "target": "act-shared",
-                 "sourceHandle": "trigger-out", "targetHandle": "act-shared-in-1",
-                 "type": "smoothstep", "applies_to_triggers": ["1"]},
+                {"id": "e-0", "source": "trigger-lead", "target": "act-shared",
+                 "sourceHandle": "trigger-lead-out", "targetHandle": "act-shared-in",
+                 "type": "smoothstep"},
+                {"id": "e-1", "source": "trigger-todo", "target": "act-shared",
+                 "sourceHandle": "trigger-todo-out", "targetHandle": "act-shared-in-left",
+                 "type": "smoothstep"},
             ],
         }
         triggers = [
-            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update"},
-            {"trigger_type": "DocType Event", "trigger_doctype": "ToDo", "trigger_event": "On Update"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update",
+             "graph_node_id": "trigger-lead"},
+            {"trigger_type": "DocType Event", "trigger_doctype": "ToDo", "trigger_event": "On Update",
+             "graph_node_id": "trigger-todo"},
         ]
         with self.assertRaises(frappe.ValidationError):
             _validate_scoping_for_multi_doctype(json.dumps(graph), triggers)
 
 
-class TestStage26WalkerTaggedEdgeRouting(unittest.TestCase):
-    """Verify _walk_graph routes based on applies_to_triggers."""
-
-    def test_walker_follows_tagged_edge_for_matching_trigger(self):
-        """Walker follows the edge whose applies_to_triggers includes the firing trigger row."""
-        from automation_builder.dispatcher import _walk_graph
-
-        graph = {
-            "nodes": [
-                {"id": "trigger", "type": "trigger", "position": {"x": 0, "y": 0},
-                 "data": {"trigger_doctype": ""}},
-                {"id": "action-lead", "type": "action", "position": {"x": 0, "y": 100},
-                 "data": {"action_type": "send_email"}},
-                {"id": "action-todo", "type": "action", "position": {"x": 200, "y": 100},
-                 "data": {"action_type": "create_document"}},
-            ],
-            "edges": [
-                {"id": "e-1", "source": "trigger", "target": "action-lead",
-                 "sourceHandle": "trigger-out", "type": "smoothstep",
-                 "applies_to_triggers": ["0"]},
-                {"id": "e-2", "source": "trigger", "target": "action-todo",
-                 "sourceHandle": "trigger-out", "type": "smoothstep",
-                 "applies_to_triggers": ["1"]},
-            ],
-        }
-        context = {
-            "doc": {"name": "LEAD-001"},
-            "ref_doctype": "Lead",
-            "ref_name": "LEAD-001",
-            "firing_trigger_name": "0",
-        }
-        trace = _walk_graph(graph, "trigger", context)
-        # Should follow only the Lead edge
-        node_ids = [e.get("node_id") for e in trace if e.get("node_id")]
-        self.assertIn("action-lead", node_ids)
-        self.assertNotIn("action-todo", node_ids)
-
-    def test_walker_skips_all_edges_when_no_match(self):
-        """Walker skips when no edge matches the firing trigger row."""
-        from automation_builder.dispatcher import _walk_graph
-
-        graph = {
-            "nodes": [
-                {"id": "trigger", "type": "trigger", "position": {"x": 0, "y": 0},
-                 "data": {"trigger_doctype": ""}},
-                {"id": "action-1", "type": "action", "position": {"x": 0, "y": 100},
-                 "data": {"action_type": "send_email"}},
-            ],
-            "edges": [
-                {"id": "e-1", "source": "trigger", "target": "action-1",
-                 "sourceHandle": "trigger-out", "type": "smoothstep",
-                 "applies_to_triggers": ["0"]},
-            ],
-        }
-        context = {
-            "doc": {"name": "TODO-001"},
-            "ref_doctype": "ToDo",
-            "ref_name": "TODO-001",
-            "firing_trigger_name": "1",  # Does not match edge
-        }
-        trace = _walk_graph(graph, "trigger", context)
-        # Should hit the "skipped" branch
-        branches = [e for e in trace if e.get("type") == "branch"]
-        self.assertTrue(any(b.get("branch_taken") == "skipped" for b in branches))
-
-    def test_walker_follows_null_applies_to_triggers(self):
-        """Edges with applies_to_triggers=null (\"All\") are always followed."""
-        from automation_builder.dispatcher import _walk_graph
-
-        graph = {
-            "nodes": [
-                {"id": "trigger", "type": "trigger", "position": {"x": 0, "y": 0},
-                 "data": {"trigger_doctype": ""}},
-                {"id": "action-1", "type": "action", "position": {"x": 0, "y": 100},
-                 "data": {"action_type": "send_email"}},
-            ],
-            "edges": [
-                {"id": "e-1", "source": "trigger", "target": "action-1",
-                 "sourceHandle": "trigger-out", "type": "smoothstep",
-                 "applies_to_triggers": None},
-            ],
-        }
-        context = {
-            "doc": {"name": "LEAD-001"},
-            "ref_doctype": "Lead",
-            "ref_name": "LEAD-001",
-            "firing_trigger_name": "0",
-        }
-        trace = _walk_graph(graph, "trigger", context)
-        node_ids = [e.get("node_id") for e in trace if e.get("node_id")]
-        self.assertIn("action-1", node_ids)
 def _validate_scoped(graph_json, triggers):
     from automation_builder.api import _validate_scoping_for_multi_doctype
     _validate_scoping_for_multi_doctype(graph_json, triggers)

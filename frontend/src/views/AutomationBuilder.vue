@@ -316,31 +316,6 @@
       </div>
     </div>
 
-    <!-- Edge Picker Modal (Trigger row tagging) -->
-    <div v-if="showEdgePicker" class="ab-modal-overlay" @click.self="cancelEdgePicker">
-      <div class="ab-modal">
-        <h3>This path applies to:</h3>
-        <div class="ab-modal-body">
-          <div class="ab-edge-picker-hint">
-            Select which trigger rows should follow this downstream path.
-            Unchecked rows will not reach the nodes on this path.
-          </div>
-          <label class="ab-edge-picker-all">
-            <input type="checkbox" v-model="edgePickerAllSelected" @change="toggleEdgePickerAll" />
-            <strong>All trigger rows</strong>
-          </label>
-          <div class="ab-edge-picker-rows">
-            <label v-for="row in edgePickerRows" :key="row.index" class="ab-edge-picker-row">
-              <input type="checkbox" v-model="row.selected" @change="toggleEdgePickerRow(row)" />
-              <span class="ab-edge-picker-row-label">{{ row.label }}</span>
-            </label>
-          </div>
-        </div>
-        <div class="ab-modal-footer">
-          <button class="ab-btn ab-btn-ghost" @click="cancelEdgePicker">Cancel</button>
-          <button class="ab-btn ab-btn-primary" @click="confirmEdgePicker">Connect</button>
-        </div>
-      </div>
     </div>
   </div>
 </template>
@@ -387,68 +362,6 @@ const runNowLoading = ref(false)
 const hasManualTrigger = computed(() => {
   return nodes.value.some(n => n.type === 'trigger' && n.data?.trigger_type === 'Manual')
 })
-
-// Edge picker state (for Trigger node second-outgoing-edge tagging)
-const showEdgePicker = ref(false)
-const edgePickerPending = ref(null) // { source, target, sourceHandle, targetHandle }
-const edgePickerRows = ref([]) // [{ index, label, selected }]
-const edgePickerAllSelected = ref(true)
-
-function openEdgePicker(pending) {
-  // Build list of trigger rows from trigger nodes
-  const triggerNodes = nodes.value.filter(n => n.type === 'trigger')
-  const rows = []
-  triggerNodes.forEach((tn, idx) => {
-    const label = tn.data?.trigger_doctype || tn.data?.trigger_type || `Trigger ${idx + 1}`
-    rows.push({ index: String(idx), label, selected: true })
-  })
-  edgePickerRows.value = rows
-  edgePickerAllSelected.value = true
-  edgePickerPending.value = pending
-  showEdgePicker.value = true
-}
-
-function toggleEdgePickerAll() {
-  const val = edgePickerAllSelected.value
-  edgePickerRows.value.forEach(r => r.selected = val)
-}
-
-function toggleEdgePickerRow(row) {
-  edgePickerAllSelected.value = edgePickerRows.value.every(r => r.selected)
-}
-
-function confirmEdgePicker() {
-  const pending = edgePickerPending.value
-  if (!pending) return
-
-  const selectedIndices = edgePickerRows.value
-    .filter(r => r.selected)
-    .map(r => r.index)
-
-  // If all are selected, store null (= "All") for backward-compat
-  const allSelected = edgePickerRows.value.length === selectedIndices.length
-  const appliesToTriggers = allSelected ? null : selectedIndices
-
-  const newEdge = {
-    id: `e-${pending.source}-${pending.target}-${Date.now()}`,
-    source: pending.source,
-    target: pending.target,
-    sourceHandle: pending.sourceHandle,
-    targetHandle: pending.targetHandle,
-    type: 'smoothstep',
-    markerEnd: { type: 'arrowclosed', color: 'var(--gray-400)' },
-    applies_to_triggers: appliesToTriggers,
-  }
-  edges.value.push(newEdge)
-
-  showEdgePicker.value = false
-  edgePickerPending.value = null
-}
-
-function cancelEdgePicker() {
-  showEdgePicker.value = false
-  edgePickerPending.value = null
-}
 
 // Type picker state (for drag-to-empty-canvas)
 const pickerVisible = ref(false)
@@ -737,7 +650,6 @@ function isValidConnection(params) {
   if (source === 'add-trigger') return false
 
   // Linear-only for non-trigger nodes: reject if source handle already has an outgoing edge
-  // Trigger node is ALLOWED multiple outgoing edges (for tagged-edge routing)
   const sourceNode = nodes.value.find(n => n.id === source)
   if (sourceNode && sourceNode.type !== 'trigger') {
     if (sourceHandle && connectedSourceHandles.value.has(`${source}:${sourceHandle}`)) {
@@ -745,27 +657,18 @@ function isValidConnection(params) {
     }
   }
 
-  const existingTarget = edges.value.find(e => e.target === target && e.targetHandle === targetHandle)
-  if (existingTarget) return false
   return true
 }
 
 function onConnect(params) {
   if (!isValidConnection(params)) return
 
-  // Check if this is a second outgoing edge from Trigger node
-  const sourceNode = nodes.value.find(n => n.id === params.source)
-  const existingTriggerEdges = edges.value.filter(e => e.source === params.source)
-
-  if (sourceNode && sourceNode.type === 'trigger' && existingTriggerEdges.length > 0) {
-    // Second+ outgoing edge from Trigger — show picker to tag which trigger rows this path applies to
-    openEdgePicker({
-      source: params.source,
-      target: params.target,
-      sourceHandle: params.sourceHandle,
-      targetHandle: params.targetHandle,
-    })
-    return
+  // Auto-detect available input handle for convergence:
+  // If the target already has an incoming edge on "-in", use "-in-left" instead.
+  let targetHandle = params.targetHandle
+  const existingIncoming = edges.value.find(e => e.target === params.target && e.targetHandle === targetHandle)
+  if (existingIncoming && targetHandle.endsWith('-in')) {
+    targetHandle = targetHandle.replace(/-in$/, '-in-left')
   }
 
   const newEdge = {
@@ -773,10 +676,9 @@ function onConnect(params) {
     source: params.source,
     target: params.target,
     sourceHandle: params.sourceHandle,
-    targetHandle: params.targetHandle,
+    targetHandle: targetHandle,
     type: 'smoothstep',
     markerEnd: { type: 'arrowclosed', color: 'var(--gray-400)' },
-    applies_to_triggers: null,
   }
   edges.value.push(newEdge)
 }
@@ -841,27 +743,21 @@ function createNodeAndConnect(nodeType, actionType, sourceNodeId, sourceHandleId
   if (sourceNodeId) {
     const sourceNode = nodes.value.find(n => n.id === sourceNodeId)
     if (sourceNode) {
-      const existingTriggerEdges = edges.value.filter(e => e.source === sourceNodeId)
-      if (sourceNode.type === 'trigger' && existingTriggerEdges.length > 0) {
-        // Second+ outgoing edge from Trigger — show picker, defer edge creation
-        openEdgePicker({
-          source: sourceNodeId,
-          target: newNodeId,
-          sourceHandle: sourceHandleId,
-          targetHandle: `${newNodeId}-in`,
-        })
-      } else {
-        edges.value.push({
-          id: `e-${sourceNodeId}-${newNodeId}`,
-          source: sourceNodeId,
-          target: newNodeId,
-          sourceHandle: sourceHandleId,
-          targetHandle: `${newNodeId}-in`,
-          type: 'smoothstep',
-          markerEnd: { type: 'arrowclosed', color: 'var(--gray-400)' },
-          applies_to_triggers: null,
-        })
+      // Auto-detect available input handle for convergence
+      let targetHandle = `${newNodeId}-in`
+      const existingIncoming = edges.value.find(e => e.target === newNodeId && e.targetHandle === targetHandle)
+      if (existingIncoming) {
+        targetHandle = `${newNodeId}-in-left`
       }
+      edges.value.push({
+        id: `e-${sourceNodeId}-${newNodeId}`,
+        source: sourceNodeId,
+        target: newNodeId,
+        sourceHandle: sourceHandleId,
+        targetHandle: targetHandle,
+        type: 'smoothstep',
+        markerEnd: { type: 'arrowclosed', color: 'var(--gray-400)' },
+      })
     }
   }
 
@@ -1066,6 +962,7 @@ async function save() {
         webhook_token: trigger.data.webhook_token || '',
         condition_logic: trigger.data.condition_logic || 'All must match',
         conditions: trigger.data.conditions || [],
+        graph_node_id: trigger.id,
       })
     }
 
@@ -1401,42 +1298,5 @@ onBeforeUnmount(() => {
 .ab-runnow-status-Skipped {
   color: var(--gray-500);
   font-weight: 600;
-}
-
-/* Edge picker (Trigger row tagging) */
-.ab-edge-picker-hint {
-  font-size: 13px;
-  color: var(--gray-500);
-  margin-bottom: 12px;
-  line-height: 1.4;
-}
-.ab-edge-picker-all {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--gray-200);
-  margin-bottom: 8px;
-  cursor: pointer;
-}
-.ab-edge-picker-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.ab-edge-picker-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-}
-.ab-edge-picker-row:hover {
-  background: var(--gray-50);
-}
-.ab-edge-picker-row-label {
-  color: var(--gray-700);
 }
 </style>

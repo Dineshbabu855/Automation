@@ -71,6 +71,13 @@
       "description": "POST to this URL to trigger the automation. Token is embedded in the URL."
     },
     {
+      "fieldname": "graph_node_id",
+      "fieldtype": "Data",
+      "label": "Graph Node ID",
+      "hidden": 1,
+      "description": "Stable reference to the Trigger node in the graph_definition JSON. Set by the frontend save() function."
+    },
+    {
       "fieldname": "condition_logic",
       "fieldtype": "Select",
       "label": "Condition Logic",

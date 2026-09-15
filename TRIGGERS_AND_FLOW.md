@@ -377,7 +377,11 @@ For Case 2:
 
 ---
 
-## 8. Trigger-Row-Tagged Edges (Stage 26)
+## 8. Multiple Trigger Nodes — Canonical Design (Stage 29)
+
+> **Retired**: The Stage 26 tagged-edge system (`applies_to_triggers` on edges, canvas
+> edge picker dialog) has been removed entirely. Multiple Trigger nodes on the canvas
+> is now the sole canonical design for multi-trigger automations.
 
 ### The problem
 
@@ -387,101 +391,117 @@ validation used a **blanket doctype-count** check: if the automation had 2+ dist
 doctypes anywhere, every field-reading node had to have explicit `trigger_doctype_select`
 set — even nodes on separate branches that were only reachable from one doctype.
 
-This produced false positives: a user could wire two independent branches (one per doctype)
-and still get "no explicit DocType scope" on nodes that were only reachable from one
-trigger row.
+Stage 26 introduced tagged edges (`applies_to_triggers` on edges) + a canvas edge picker
+to route paths by trigger row index. This added complexity but still required a single
+Trigger node on canvas.
 
-### The solution: tagged edges + reachability
+### The solution: one Trigger node per trigger row
 
-**Tagged edges**: each edge from the Trigger node carries an `applies_to_triggers` field —
-a list of trigger-row indices (as strings: `["0"]`, `["1"]`, etc.) or `null` (meaning "All").
-When the Trigger node has multiple outgoing edges, the dispatcher filters them by this field
-before routing. Only edges whose `applies_to_triggers` includes the firing trigger row's
-index are followed.
+Each trigger row in the child table maps to its **own Trigger node** on the canvas.
+A `graph_node_id` field on the `Automation Trigger` child table links each row to its
+canvas node. No tagging, no picker dialog — each Trigger node has exactly one outgoing edge.
 
-**Reachability-based scoping**: the save-time validation now performs a BFS from each
-trigger row through tagged edges to compute which doctypes can actually reach each
-unscoped node. A node is only rejected when it is reachable from trigger rows spanning
-**2+ distinct doctypes** AND lacks explicit `trigger_doctype_select`.
+### Data model
 
-### Edge data model
-
+**Trigger node** (canvas):
 ```json
-{
-  "id": "e-trigger-cond-lead",
-  "source": "trigger",
-  "target": "cond-lead",
-  "sourceHandle": "trigger-out",
-  "targetHandle": "cond-lead-in",
-  "type": "smoothstep",
-  "applies_to_triggers": ["0"]
-}
+{ "id": "trigger-lead", "type": "trigger", "position": {"x": 250, "y": 50},
+  "data": { "trigger_doctype": "Lead", "trigger_event": "On Update" } }
 ```
 
-| `applies_to_triggers` value | Meaning |
-|---|---|
-| `null` or absent | "All" — this edge is followed for every trigger row |
-| `["0"]` | Only follows when trigger row index 0 fires |
-| `["0", "1"]` | Follows when either row 0 or row 1 fires |
+**Edge** (canvas):
+```json
+{ "id": "e-trigger-lead-cond-lead", "source": "trigger-lead", "target": "cond-lead",
+  "sourceHandle": "trigger-lead-out", "targetHandle": "cond-lead-in", "type": "smoothstep" }
+```
 
-### How the walker uses tagged edges
+**Trigger row** (child table):
+```json
+{ "trigger_type": "DocType Event", "trigger_doctype": "Lead", "trigger_event": "On Update",
+  "condition_logic": "All must match", "conditions": [], "graph_node_id": "trigger-lead" }
+```
 
-In `dispatcher.py:_walk_graph`, when the Trigger node has outgoing edges with
-`applies_to_triggers` tags:
+The `graph_node_id` field is what links the trigger row to its canvas Trigger node.
 
-1. The `firing_trigger_name` is looked up from `context["firing_trigger_name"]`
-2. Each outgoing edge's `applies_to_triggers` is checked
-3. Only matching edges are kept for routing
-4. If no edges match, execution stops with a "skipped" branch trace
+### How dispatch works
 
-### How the canvas picker works
+In `dispatcher.py:_find_start_trigger(available_trigger_nodes, trigger_doctype, context, automation)`:
 
-When the user creates a **second** outgoing edge from the Trigger node, the canvas shows
-a picker dialog: "This path applies to:" with checkboxes per trigger row + "All". The
-default is "All" (null). The user can select specific trigger rows to restrict the path.
+1. If `automation` is provided, iterate its `triggers` child table
+2. For each row where `trigger_doctype == trigger_doctype`, look up `graph_node_id`
+3. If `graph_node_id` matches an available Trigger node ID → return it (primary path)
+4. Fallback: match by `trigger_doctype` against the Trigger node's `data.trigger_doctype`
+5. Return the first match, or `None` if no trigger matches
 
-### How reachability analysis works
+This replaces the old `firing_trigger_name` + tagged-edge filtering.
+
+In `dispatcher.py:_walk_graph`:
+
+1. `_find_start_trigger` returns the starting node ID
+2. Walk follows edges forward from that Trigger node — no tagged-edge filtering
+3. Each Trigger node has one outgoing edge → only its own path is walked
+4. Convergence is handled by multiple edges targeting the same node (via different handles)
+
+### How convergence works
+
+Multiple Trigger nodes can converge into a shared Action node. The Action node needs
+two input handles: `act-shared-in` (left) and `act-shared-in-right` (right). Each Trigger
+path targets a different handle:
+
+```
+trigger-lead ──> cond-lead ──> act-shared  (left handle)
+trigger-todo ──> cond-todo ──> act-shared  (right handle)
+```
+
+The walker checks incoming handles to avoid re-visiting already-visited nodes. When a
+node has incoming from multiple Trigger paths, only the first path to reach it executes it.
+
+### How scoping validation works
 
 The validation in `api.py:_validate_scoping_for_multi_doctype`:
 
-1. Maps trigger-row indices to Trigger nodes in the graph (by doctype)
-2. For each trigger row, BFS follows edges from its Trigger node, respecting
-   `applies_to_triggers` tags
-3. For each field-reading node (Action, Condition, IF, Switch), checks which
-   trigger rows can reach it
-4. If 0 or 1 distinct doctypes reach the node → no ambiguity → passes
-5. If 2+ distinct doctypes reach the node AND `trigger_doctype_select` is empty → rejects
+1. For each trigger row, find its Trigger node by `graph_node_id` (primary) or
+   `trigger_doctype` (fallback)
+2. Forward-walk from each Trigger node through edges to find reachable nodes
+3. For each reachable Action/Condition/IF/Switch node, check if it has explicit
+   `trigger_doctype_select` set
+4. If a node is reachable from Trigger nodes of **2+ distinct doctypes** AND
+   `trigger_doctype_select` is empty → reject
+5. If reachable from only one doctype, or `trigger_doctype_select` is set → pass
 
-### Worked example: two separate paths
+### Worked example: user's exact scenario
 
 ```
 Automation: "Lead + ToDo Follow-up"
   Triggers: Lead / On Update, ToDo / On Update
 
   Graph:
-    trigger ──(applies_to_triggers: ["0"])──> Condition(status=New)
-                                                    │
-                                              Send Email (scoped to Lead)
-    trigger ──(applies_to_triggers: ["1"])──> Condition(priority=High)
-                                                    │
-                                              Create Document (scoped to ToDo)
+    trigger-lead ──> Condition(status=Open) ──┐
+                                              ├──> Create Document (scoped: any)
+    trigger-todo ──> Condition(status=Open) ──┘
 ```
 
-- **Lead updated**: trigger row 0 fires → edge tagged `["0"]` followed → Condition
-  checks status → Send Email executes. Edge tagged `["1"]` is skipped.
-- **ToDo updated**: trigger row 1 fires → edge tagged `["1"]` followed → Condition
-  checks priority → Create Document executes. Edge tagged `["0"]` is skipped.
+- **Lead updated**: `_find_start_trigger("Lead")` returns `"trigger-lead"`. Walk follows
+  `trigger-lead` → cond-lead → act-shared. Note created.
+- **ToDo updated**: `_find_start_trigger("ToDo")` returns `"trigger-todo"`. Walk follows
+  `trigger-todo` → cond-todo → act-shared. Note created.
+- **Scoping**: act-shared is reachable from both Lead and ToDo → `trigger_doctype_select`
+  must be set to `"any"` → validation passes.
 
-Both paths are independent. No `trigger_doctype_select` is needed on the Condition
-nodes because each is only reachable from one trigger row.
+### Convergence UX (frontend)
 
-### Backward compatibility
+When connecting a new edge to a target node that already has an incoming edge, the
+frontend automatically assigns the target handle to `target-in-right` (or `target-in-left`
+as fallback). This ensures both edges can connect without manual handle selection.
 
-- Existing automations have no `applies_to_triggers` on edges (null/absent = "All")
-- The walker treats null as "always follow" — all existing automations work unchanged
-- The reachability analysis treats null edges as "reachable from all trigger rows" —
-  same as the old blanket check for shared paths
-- No migration needed: edges without the field default to null
+### Migration notes
+
+- Old automations with `applies_to_triggers` on edges: those fields are ignored.
+  The walker no longer reads `applies_to_triggers`. Edges are followed unconditionally.
+- The `graph_node_id` column on `tabAutomation Trigger` was added in Stage 29.
+  Existing rows have `NULL` for this field — the fallback path matches by `trigger_doctype`.
+- Old automations with a single Trigger node continue to work unchanged.
+- The canvas edge picker dialog and all its code have been removed from the frontend.
 
 ---
 

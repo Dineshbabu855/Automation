@@ -337,9 +337,9 @@ class TestStage26_5CategoryA(IntegrationTestCase):
         """A3: 4 trigger rows mixing doctypes and events, each tagged to own action."""
         auto_name = "ST26.5-A3-FourTriggersMixed"
         self._cleanup_auto(auto_name)
-        # Clean leftover Notes from prior runs
-        for n in frappe.get_all("Note", filters={"title": ["in", ["PATH-0", "PATH-1", "PATH-2", "PATH-3"]]}):
-            frappe.delete_doc("Note", n.name, force=True)
+        # Bulk-delete leftover Notes from prior runs (avoids TooManyWritesError
+        # from per-doc add_to_deleted_document audit when hundreds accumulate)
+        frappe.db.sql("DELETE FROM `tabNote` WHERE title IN ('PATH-0','PATH-1','PATH-2','PATH-3')")
         frappe.db.commit()
 
         nodes = [
@@ -412,12 +412,13 @@ class TestStage26_5CategoryB(IntegrationTestCase):
             frappe.delete_doc("Automation", name, force=True)
 
     def test_B1_convergence_unscoped_rejected(self):
-        """B1: Two tagged paths converging into ONE shared action -> rejected at save."""
+        """B1: Two Trigger nodes converging into ONE shared unscoped action -> rejected at save."""
         auto_name = "ST26.5-B1-ConvergenceRejected"
         self._cleanup_auto(auto_name)
 
         nodes = [
-            _make_trigger_node(),
+            _make_trigger_node("trigger-lead", trigger_doctype="Lead"),
+            _make_trigger_node("trigger-todo", trigger_doctype="ToDo"),
             _make_action_node("act-shared", "create_document", {
                 "target_doctype": "Note", "field_mapping": [
                     {"target_field": "title", "source_value": "SHARED"},
@@ -425,16 +426,16 @@ class TestStage26_5CategoryB(IntegrationTestCase):
             }),
         ]
         edges = [
-            {"id": "e-trigger-act-shared-0", "source": "trigger", "target": "act-shared",
-             "sourceHandle": "trigger-out", "targetHandle": "act-shared-in-0",
-             "type": "smoothstep", "applies_to_triggers": ["0"]},
-            {"id": "e-trigger-act-shared-1", "source": "trigger", "target": "act-shared",
-             "sourceHandle": "trigger-out", "targetHandle": "act-shared-in-1",
-             "type": "smoothstep", "applies_to_triggers": ["1"]},
+            {"id": "e-tl-as", "source": "trigger-lead", "target": "act-shared",
+             "sourceHandle": "trigger-lead-out", "targetHandle": "act-shared-in",
+             "type": "smoothstep"},
+            {"id": "e-tt-as", "source": "trigger-todo", "target": "act-shared",
+             "sourceHandle": "trigger-todo-out", "targetHandle": "act-shared-in-left",
+             "type": "smoothstep"},
         ]
         triggers = [
-            _make_trigger("Lead", "On Update"),
-            _make_trigger("ToDo", "On Update"),
+            _make_trigger("Lead", "On Update", graph_node_id="trigger-lead"),
+            _make_trigger("ToDo", "On Update", graph_node_id="trigger-todo"),
         ]
 
         with self.assertRaises(frappe.ValidationError):
@@ -538,35 +539,34 @@ class TestStage26_5CategoryB(IntegrationTestCase):
         self._cleanup_auto(auto_name)
 
     def test_B4_all_tagged_edge_requires_scoping(self):
-        """B4: 'All' (null) edge alongside specifically-tagged edges from same Trigger.
-        Node downstream of 'All' edge is reachable from every trigger row -> requires scoping."""
+        """B4: Two Trigger nodes converging on a shared unscoped action -> rejected.
+        Canonical equivalent of the old 'All edge alongside tagged edges' case:
+        the shared action is reachable from both trigger rows and lacks scoping."""
         auto_name = "ST26.5-B4-AllEdgeScoping"
         self._cleanup_auto(auto_name)
 
         nodes = [
-            _make_trigger_node(),
-            _make_action_node("act-all", "create_document", {
+            _make_trigger_node("trigger-lead", trigger_doctype="Lead"),
+            _make_trigger_node("trigger-todo", trigger_doctype="ToDo"),
+            _make_action_node("act-shared", "create_document", {
                 "target_doctype": "Note", "field_mapping": [
-                    {"target_field": "title", "source_value": "ALL-EDGE"},
+                    {"target_field": "title", "source_value": "SHARED"},
                 ],
-            }),
-            _make_action_node("act-specific", "create_document", {
-                "target_doctype": "Note", "field_mapping": [
-                    {"target_field": "title", "source_value": "SPECIFIC-EDGE"},
-                ],
-                "trigger_doctype_select": "Lead",
             }),
         ]
         edges = [
-            _edge("trigger", "act-all", applies_to=None),  # "All" edge
-            _edge("trigger", "act-specific", applies_to=["0"]),
+            {"id": "e-tl-as", "source": "trigger-lead", "target": "act-shared",
+             "sourceHandle": "trigger-lead-out", "targetHandle": "act-shared-in",
+             "type": "smoothstep"},
+            {"id": "e-tt-as", "source": "trigger-todo", "target": "act-shared",
+             "sourceHandle": "trigger-todo-out", "targetHandle": "act-shared-in-left",
+             "type": "smoothstep"},
         ]
         triggers = [
-            _make_trigger("Lead", "On Update"),
-            _make_trigger("ToDo", "On Update"),
+            _make_trigger("Lead", "On Update", graph_node_id="trigger-lead"),
+            _make_trigger("ToDo", "On Update", graph_node_id="trigger-todo"),
         ]
 
-        # act-all is reachable from both Lead AND ToDo via the null edge -> requires scoping
         with self.assertRaises(frappe.ValidationError):
             _create_and_publish(auto_name, nodes, edges, triggers)
 
@@ -1153,30 +1153,32 @@ class TestStage26_5CategoryF(IntegrationTestCase):
         self._cleanup_auto(auto_name)
 
     def test_F2_publish_rejects_unscoped_convergence(self):
-        """F2: Attempt to publish with unscoped convergence node -> rejected at save."""
+        """F2: Attempt to publish with unscoped convergence node -> rejected at save.
+        Canonical shape: two Trigger nodes, each with its own edge, converging on
+        a shared action without trigger_doctype_select."""
         auto_name = "ST26.5-F2-PublishRejects"
         self._cleanup_auto(auto_name)
 
         nodes = [
-            _make_trigger_node(),
+            _make_trigger_node("trigger-lead", trigger_doctype="Lead"),
+            _make_trigger_node("trigger-todo", trigger_doctype="ToDo"),
             _make_action_node("act-shared", "create_document", {
                 "target_doctype": "Note", "field_mapping": [
                     {"target_field": "title", "source_value": "SHARED"},
                 ],
-                # NO trigger_doctype_select -> unscoped
             }),
         ]
         edges = [
-            {"id": "e-trigger-act-shared-0", "source": "trigger", "target": "act-shared",
-             "sourceHandle": "trigger-out", "targetHandle": "act-shared-in-0",
-             "type": "smoothstep", "applies_to_triggers": ["0"]},
-            {"id": "e-trigger-act-shared-1", "source": "trigger", "target": "act-shared",
-             "sourceHandle": "trigger-out", "targetHandle": "act-shared-in-1",
-             "type": "smoothstep", "applies_to_triggers": ["1"]},
+            {"id": "e-tl-as", "source": "trigger-lead", "target": "act-shared",
+             "sourceHandle": "trigger-lead-out", "targetHandle": "act-shared-in",
+             "type": "smoothstep"},
+            {"id": "e-tt-as", "source": "trigger-todo", "target": "act-shared",
+             "sourceHandle": "trigger-todo-out", "targetHandle": "act-shared-in-left",
+             "type": "smoothstep"},
         ]
         triggers = [
-            _make_trigger("Lead", "On Update"),
-            _make_trigger("ToDo", "On Update"),
+            _make_trigger("Lead", "On Update", graph_node_id="trigger-lead"),
+            _make_trigger("ToDo", "On Update", graph_node_id="trigger-todo"),
         ]
 
         with self.assertRaises(frappe.ValidationError):

@@ -2530,3 +2530,196 @@ test_18_branching excluded (hangs — pre-existing issue, not caused by our chan
 - `automation_builder/tests/test_19_security.py` — Added 8 new tests: DNS rebinding (2), webhook token leakage (1), denylist gaps (5)
 - `ARCHITECTURE.md` — Updated roadmap, test count, added 3 new limitations, removed `{{trigger_<doctype>.fieldname}}` claim
 - `TRIGGERS_AND_FLOW.md` — Fixed `trigger_doctype_select` coverage claim, clarified `_SCOPABLE_NODE_TYPES`
+
+## Stage 28 — Multi-trigger convergence with Condition nodes — 2026-09-15
+
+### Part A: Problem reproduction
+
+User reported that a multi-trigger automation with Condition nodes between Trigger and Action nodes produces ZERO Automation Run records. The failing shape:
+
+```
+Trigger ──[tagged: Lead]──> Condition-1 ──> Action (shared)
+Trigger ──[tagged: ToDo]──> Condition-2 ──> Action (shared)
+```
+
+Stage 26.5's B1-B4 convergence tests only tested `trigger→action` directly, never with intermediate Condition nodes. This shape was never tested.
+
+**Two root causes identified:**
+
+1. **Backend (Primary)**: `dispatcher.py` always starts `_walk_graph` at `trigger_nodes[0]` (first Trigger node). When multiple Trigger nodes exist and a non-first Trigger fires, the walker follows the wrong path and produces zero results. Same bug in `execute_webhook_trigger` and `_execute_schedule_trigger`.
+
+2. **Frontend**: Edge picker only shows for SECOND+ outgoing edge from Trigger node. First edge defaults to `applies_to_triggers: null` ("All"), making downstream Condition node reachable from ALL trigger rows, causing `_validate_scoping_for_multi_doctype` to reject the save.
+
+### Part B: Save scenarios (Part A tests)
+
+| Scenario | Description | Result |
+|----------|-------------|--------|
+| A1 | Both edges tagged + action scoped "any" | **Saves and executes correctly** |
+| A2 | Both edges tagged + action unscoped | **Correctly rejected** by scoping validation |
+| A3 | First edge All + second tagged + action any | **Rejected** (Condition-1 reachable from both triggers, no scoping) |
+| A4 | Same as A3 with explicit empty scoping | **Rejected** |
+
+### Part C: Graph walk verification (B1-B4)
+
+| Test | Trigger | Description | Result |
+|------|---------|-------------|--------|
+| B1 | Lead | Both edges tagged → walker follows Lead path | **Correct**: cond-lead → act-shared |
+| B2 | ToDo | Both edges tagged → walker follows ToDo path | **Correct**: cond-todo → act-shared |
+| B3 | Lead | First edge All, second tagged → walker follows first matching edge | **Correct**: cond-lead → act-shared |
+| B4 | ToDo | First edge All, second tagged → walker follows first (wrong) edge | **Correct**: cond-lead FAILS → stops (cond-todo never reached) |
+
+### Part D: Fix implementation
+
+**D1: Backend fix** (`dispatcher.py`)
+
+Added `_find_start_trigger()` helper function that selects the correct Trigger node to start the graph walk:
+- Matches by `trigger_doctype` on the node's data against `ref_doctype`
+- Falls back to `firing_trigger_name` index if available
+- Falls back to `trigger_nodes[0]` (single trigger or no match)
+
+Fixed all three callers:
+- `execute_automation()` (line ~298)
+- `execute_webhook_trigger()` (line ~674)
+- `_execute_schedule_trigger()` (line ~809)
+
+**D2: Frontend fix** (`AutomationBuilder.vue`)
+
+Updated `onConnect` and `createNodeAndConnect` to show edge picker for FIRST outgoing edge from Trigger node when there are multiple Trigger nodes on canvas (`triggerNodes.length > 1`), not just when `existingTriggerEdges.length > 0`.
+
+### Part E: Multi-Trigger-node topology tests (E1-E5)
+
+Tests matching what the frontend ACTUALLY produces — two separate Trigger nodes each with one outgoing edge:
+
+```
+Trigger-1 (Lead) ──> Condition-1 ──> Action (shared)
+Trigger-2 (ToDo) ──> Condition-2 ──> Action (shared)
+```
+
+| Test | Description | Result |
+|------|-------------|--------|
+| E1 | Lead fires → walks Trigger-1 path → action creates Note | **PASS** |
+| E2 | ToDo fires → walks Trigger-2 path → action creates Note | **PASS** |
+| E3 | Both Lead + ToDo fire → each produces its own run | **PASS** |
+| E4 | Graph walk: Lead → starts at trigger-lead → follows cond-lead | **PASS** |
+| E5 | Graph walk: ToDo → starts at trigger-todo → follows cond-todo | **PASS** |
+
+### Part F: `_find_start_trigger` unit tests (F1-F6)
+
+| Test | Description | Result |
+|------|-------------|--------|
+| F1 | Single trigger node → returns that node | **PASS** |
+| F2 | Multiple triggers → matches by ref_doctype (ToDo) | **PASS** |
+| F3 | Multiple triggers → matches by ref_doctype (Lead) | **PASS** |
+| F4 | No matching doctype → falls back to trigger_nodes[0] | **PASS** |
+| F5 | No doctype match, firing_trigger_name index → uses index | **PASS** |
+| F6 | Empty trigger nodes → returns default "trigger" | **PASS** |
+
+### Part G: full suite count
+
+| Module | Tests | Status |
+|--------|-------|--------|
+| test_17b_verify | 14 | ✅ OK |
+| test_19_security | 30 | ✅ OK |
+| test_20_condition_groups | 21 | ✅ OK |
+| test_20a_multitrigger | 3 | ✅ OK |
+| test_23_5_scoping | 8 | ✅ OK |
+| test_24_manual_schedule | 21 | ✅ OK |
+| test_25_webhook | 13 | ✅ OK |
+| test_26_5_stress | 21 | ✅ OK |
+| test_28_convergence_condition | 19 | ✅ OK |
+| test_graph_traversal | 8 | ✅ OK |
+| test_migration_patch | 7 | ✅ OK |
+| **Total (excl. test_18_branching)** | **165** | **0 failures** |
+
+### Files changed
+- `automation_builder/dispatcher.py` — Added `_find_start_trigger()` helper; fixed `execute_automation`, `execute_webhook_trigger`, `_execute_schedule_trigger` to use it instead of `trigger_nodes[0]`
+- `automation_builder/tests/test_28_convergence_condition.py` — New test file: 19 tests across Parts A-F
+- `frontend/src/views/AutomationBuilder.vue` — Fixed edge picker to show for first outgoing edge from Trigger when multiple Trigger nodes exist
+
+---
+
+## Stage 29 — Canonical multi-Trigger-node design — 2026-09-15
+
+### Decision
+
+Multiple Trigger nodes on the canvas (one per trigger row) is the **sole** canonical multi-trigger design. The Stage 26 tagged-edge system (`applies_to_triggers` on edges, canvas edge picker dialog) has been retired entirely.
+
+### Part A: graph_node_id linkage
+
+- Added `graph_node_id` (hidden Data field) to `Automation Trigger` DocType
+- Frontend `save()` sends `graph_node_id: trigger.id` for each trigger row
+- Backend `_find_start_trigger` uses `graph_node_id` for direct lookup (primary), with `trigger_doctype` fallback
+- All three entry points (`execute_automation`, `execute_webhook_trigger`, `_execute_schedule_trigger`) now pass `automation` to `_find_start_trigger`
+
+### Part B: Retire tagged-edge routing
+
+- Removed the entire `applies_to_triggers` filtering block from `_walk_graph`
+- Edges are followed unconditionally — no tagged-edge dispatch
+- Cleaned up `firing_trigger_name` comments in all three entry points
+
+### Part C: Rewrite scoping validation
+
+- Replaced reachability-based BFS (which relied on `applies_to_triggers`) with simple forward-walk from each Trigger node
+- `_validate_scoping_for_multi_doctype` now:
+  1. Finds each Trigger node by `graph_node_id` (primary) or `trigger_doctype` (fallback)
+  2. Forward-walks from each Trigger to find reachable nodes
+  3. Rejects shared unscoped nodes reachable from 2+ distinct doctypes
+
+### Part D: Frontend cleanup
+
+- Removed edge picker entirely (modal, state, functions, CSS)
+- Simplified `onConnect` to always create edges directly
+- Added convergence UX: auto-detects available input handle (`-in-right` when target already has incoming edge)
+- Removed `applies_to_triggers` from all edge creation
+
+### Part E: Migration
+
+- `bench migrate` applied schema change for `graph_node_id` column
+- `E2E-Tagged-Paths` test fixture migrated from old single-Trigger-node tagged-edge → multi-Trigger-node design
+- `Two Trigger Manual` already used the new design (no migration needed)
+- Other automations: single trigger, unaffected
+
+### Part F: Tests with real save() payload shape
+
+- Wrote `test_29_multitrigger_canonical.py` — 15 tests using the exact payload shape produced by `AutomationBuilder.vue save()`
+- All tests use `graph_node_id` on trigger rows, no `applies_to_triggers` on edges
+- 3 test classes: UserScenario (G1-G4), GraphWalk (H1-H6), Scoping (I1-I5)
+
+### Part G: End-to-end verification
+
+User's exact scenario tested and confirmed working:
+- Lead fires → walks `trigger-lead` path → creates Note
+- ToDo fires → walks `trigger-todo` path → creates Note
+- Both fire → each produces its own run
+- Shared action with `trigger_doctype_select: "any"` passes scoping validation
+
+### Part H: Documentation
+
+- Rewrote `TRIGGERS_AND_FLOW.md` Section 8: replaced tagged-edge description with canonical multi-Trigger-node design
+- Documented `graph_node_id` linkage, convergence UX, scoping validation, migration notes
+
+### Full suite count
+
+| Module | Tests | Status |
+|--------|-------|--------|
+| test_17b_verify | 14 | ✅ OK |
+| test_19_security | 30 | ✅ OK |
+| test_20_condition_groups | 21 | ✅ OK |
+| test_20a_multitrigger | 3 | ✅ OK |
+| test_23_5_scoping | 8 | ✅ OK |
+| test_24_manual_schedule | 21 | ✅ OK |
+| test_25_webhook | 13 | ✅ OK |
+| test_26_5_stress | 21 | ✅ OK |
+| test_28_convergence_condition | 19 | ✅ OK |
+| test_29_multitrigger_canonical | 15 | ✅ OK |
+| test_graph_traversal | 8 | ✅ OK |
+| test_migration_patch | 7 | ✅ OK |
+| **Total (excl. test_18_branching)** | **180** | **0 failures** |
+
+### Files changed
+- `automation_builder/automation_builder/doctype/automation_trigger/automation_trigger.json` — Added `graph_node_id` field
+- `automation_builder/dispatcher.py` — `_find_start_trigger` uses `graph_node_id`; removed tagged-edge filtering from `_walk_graph`
+- `automation_builder/api.py` — `save_automation` sends `graph_node_id`; `_validate_scoping_for_multi_doctype` uses forward-walk BFS
+- `frontend/src/views/AutomationBuilder.vue` — Removed edge picker; added convergence handle logic; `save()` sends `graph_node_id`
+- `automation_builder/tests/test_29_multitrigger_canonical.py` — New test file: 15 tests across Parts G-I
+- `TRIGGERS_AND_FLOW.md` — Section 8 rewritten for canonical multi-Trigger-node design

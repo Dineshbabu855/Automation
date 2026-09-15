@@ -118,7 +118,7 @@ class TestIFBranchSelection(IntegrationTestCase):
 
         branch_entries = [e for e in trace if e["type"] == "branch"]
         self.assertEqual(len(branch_entries), 1)
-        self.assertEqual(branch_entries[0]["branch_taken"], "if-true")
+        self.assertEqual(branch_entries[0]["branch_taken"], "true")
         self.assertIn("TRUE", branch_entries[0]["output"])
 
     def test_if_false_branch(self):
@@ -133,7 +133,7 @@ class TestIFBranchSelection(IntegrationTestCase):
 
         branch_entries = [e for e in trace if e["type"] == "branch"]
         self.assertEqual(len(branch_entries), 1)
-        self.assertEqual(branch_entries[0]["branch_taken"], "if-false")
+        self.assertEqual(branch_entries[0]["branch_taken"], "false")
         self.assertIn("FALSE", branch_entries[0]["output"])
 
     def test_if_not_equal_operator(self):
@@ -320,14 +320,14 @@ class TestBranchingExecution(IntegrationTestCase):
         log = json.loads(run.log)
         branch_steps = [s for s in log if s.get("step_type") == "if"]
         self.assertTrue(len(branch_steps) > 0)
-        self.assertEqual(branch_steps[0]["branch_taken"], "if-true")
+        self.assertEqual(branch_steps[0]["branch_taken"], "true")
 
         # Check Automation Run Step records exist
         steps = frappe.get_all("Automation Run Step", filters={"parent": run.name}, fields=["node_id", "node_type", "step_type", "branch_taken", "status"])
         self.assertTrue(len(steps) > 0)
         branch_step_rec = [s for s in steps if s.node_type == "if"]
         self.assertTrue(len(branch_step_rec) > 0)
-        self.assertEqual(branch_step_rec[0].branch_taken, "if-true")
+        self.assertEqual(branch_step_rec[0].branch_taken, "true")
         self.assertEqual(branch_step_rec[0].status, "Success")
 
     def test_if_execution_false_branch(self):
@@ -374,7 +374,7 @@ class TestBranchingExecution(IntegrationTestCase):
         self.assertIn("telegram", step_types)
 
         branch_step = [s for s in log if s["step_type"] == "if"][0]
-        self.assertEqual(branch_step["branch_taken"], "if-false")
+        self.assertEqual(branch_step["branch_taken"], "false")
 
 
 class TestMidChainRemovalRecheck(IntegrationTestCase):

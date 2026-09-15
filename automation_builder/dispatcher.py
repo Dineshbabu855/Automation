@@ -283,10 +283,8 @@ def execute_automation(automation_name, ref_doctype, ref_name):
         # In cross-doctype automations, this tells actions which doctype triggered this run
         context["trigger_doctype"] = ref_doctype
 
-        # Find the firing trigger row for tagged-edge routing
+        # Find the firing trigger row index for context
         # Match ref_doctype against the automation's trigger rows.
-        # Use the loop INDEX (as string) to match against applies_to_triggers
-        # on edges, which stores index strings like ["0"], ["1"], etc.
         firing_indices = []
         for idx, t in enumerate(automation.triggers):
             if t.trigger_doctype == ref_doctype:
@@ -294,9 +292,10 @@ def execute_automation(automation_name, ref_doctype, ref_name):
         if firing_indices:
             context["firing_trigger_name"] = firing_indices[0]
 
-        # Find the first trigger node dynamically (supports multiple triggers)
+        # Find the correct trigger node to start the graph walk.
+        # Uses graph_node_id linkage for direct lookup — no string matching.
         trigger_nodes = [n for n in graph.get("nodes", []) if n.get("type") == "trigger"]
-        start_id = trigger_nodes[0]["id"] if trigger_nodes else "trigger"
+        start_id = _find_start_trigger(trigger_nodes, ref_doctype, context, automation)
         step_trace = _walk_graph(graph, start_id, context)
 
         any_failed = False
@@ -431,6 +430,51 @@ def _execute_action(action_type, config, context):
 
 
 # ---------------------------------------------------------------------------
+# Find the correct trigger node to start the graph walk
+# ---------------------------------------------------------------------------
+def _find_start_trigger(trigger_nodes, ref_doctype, context, automation=None):
+    """Find the trigger node to start the graph walk.
+
+    Uses the stable ``graph_node_id`` linkage stored on each Automation Trigger
+    row.  When ``automation`` is provided, the firing trigger row is looked up
+    by matching ``ref_doctype`` against trigger rows, then its ``graph_node_id``
+    is used to find the exact Trigger node in the graph — no string matching
+    ambiguity even when two rows share the same doctype+event.
+
+    Falls back to ``trigger_nodes[0]`` when:
+    - There is only one trigger node
+    - ``automation`` is not provided (legacy callers)
+    - No trigger row matches ``ref_doctype``
+    - ``graph_node_id`` is not set on the matched row
+    """
+    if not trigger_nodes:
+        return "trigger"
+
+    if len(trigger_nodes) == 1:
+        return trigger_nodes[0]["id"]
+
+    # Build a set of valid graph node IDs for fast lookup
+    valid_ids = {tn["id"] for tn in trigger_nodes}
+
+    # Primary path: use graph_node_id from the firing trigger row
+    if automation is not None:
+        for t in automation.triggers:
+            if t.trigger_doctype == ref_doctype:
+                gnid = getattr(t, "graph_node_id", None) or ""
+                if gnid and gnid in valid_ids:
+                    return gnid
+
+    # Fallback: match by trigger_doctype on the node's data
+    if ref_doctype:
+        for tn in trigger_nodes:
+            tn_doctype = tn.get("data", {}).get("trigger_doctype", "")
+            if tn_doctype == ref_doctype:
+                return tn["id"]
+
+    return trigger_nodes[0]["id"]
+
+
+# ---------------------------------------------------------------------------
 # Branching-aware graph walker
 # ---------------------------------------------------------------------------
 def _evaluate_branching_node(node, context):
@@ -459,10 +503,9 @@ def _walk_graph(graph, start_id, context=None):
     When context is provided (execution walk), branching nodes are evaluated and
     only the matching branch is followed.
 
-    When the Trigger node has multiple outgoing edges, only follow edges whose
-    ``applies_to_triggers`` list includes the firing trigger row's identifier,
-    or edges with ``applies_to_triggers`` = null/empty (meaning "All").
-    The firing trigger row identifier is looked up from context["firing_trigger_name"].
+    Each Trigger node has exactly one outgoing edge to its own downstream chain.
+    The caller is responsible for starting the walk at the correct Trigger node
+    (via ``_find_start_trigger``).
     """
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
@@ -493,32 +536,6 @@ def _walk_graph(graph, start_id, context=None):
             if node_type == "action" and node.get("data", {}).get("action_type"):
                 trace.append({"type": "action", "node_id": current_id})
             break
-
-        # Trigger node routing: if outgoing edges have applies_to_triggers, filter
-        if node_type == "trigger" and context and outgoing:
-            firing_trigger = context.get("firing_trigger_name", "")
-            has_any_tags = any(
-                (e_data.get("applies_to_triggers") or [])
-                for _sh, _tgt, e_data in outgoing
-            )
-            if has_any_tags:
-                filtered = []
-                for sh, tgt, e_data in outgoing:
-                    applies = e_data.get("applies_to_triggers") or []
-                    # null/empty means "All" — always included
-                    if not applies or (firing_trigger and firing_trigger in applies):
-                        filtered.append((sh, tgt, e_data))
-                if not filtered:
-                    # No matching edge — dead end for this trigger row
-                    trace.append({
-                        "type": "branch",
-                        "node_id": current_id,
-                        "node_type": "trigger",
-                        "branch_taken": "skipped",
-                        "output": f"No downstream path applies to trigger row '{firing_trigger}'",
-                    })
-                    break
-                outgoing = filtered
 
         if context and node_type in ("if", "switch"):
             # Doctype scoping: if the branching node is scoped to a specific
@@ -664,15 +681,14 @@ def execute_webhook_trigger(automation_name, payload):
         "trigger_doctype": _WEBHOOK_DOCTYPE,
     }
 
-    # Set firing_trigger_name to the index of this Webhook trigger row
-    # so tagged-edge routing works for Webhook triggers too.
+    # Find the firing trigger row index for context
     for t_idx, t_row in enumerate(automation.triggers):
         if t_row.trigger_type == "Webhook":
             context["firing_trigger_name"] = str(t_idx)
             break
 
     trigger_nodes = [n for n in graph.get("nodes", []) if n.get("type") == "trigger"]
-    start_id = trigger_nodes[0]["id"] if trigger_nodes else "trigger"
+    start_id = _find_start_trigger(trigger_nodes, "", context, automation)
     step_trace = _walk_graph(graph, start_id, context)
 
     any_failed = False
@@ -799,15 +815,14 @@ def _execute_schedule_trigger(trigger, now):
     # Build context with doc=None — {{trigger.*}} resolves to empty
     context = {"doc": None, "ref_doctype": "", "ref_name": "", "trigger_doctype": ""}
 
-    # Set firing_trigger_name to the index of this Schedule trigger row
-    # so tagged-edge routing works for Schedule triggers too.
+    # Find the firing trigger row index for context
     for t_idx, t_row in enumerate(automation.triggers):
         if t_row.name == trigger.trigger_name:
             context["firing_trigger_name"] = str(t_idx)
             break
 
     trigger_nodes = [n for n in graph.get("nodes", []) if n.get("type") == "trigger"]
-    start_id = trigger_nodes[0]["id"] if trigger_nodes else "trigger"
+    start_id = _find_start_trigger(trigger_nodes, "", context, automation)
     step_trace = _walk_graph(graph, start_id, context)
 
     any_failed = False

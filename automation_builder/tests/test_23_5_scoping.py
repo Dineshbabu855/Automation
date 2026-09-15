@@ -209,16 +209,20 @@ class TestSameFieldNameTwoTriggers(IntegrationTestCase):
             }).insert(ignore_permissions=True)
         frappe.db.commit()
 
-        # Create a Lead with status=Open
+        # Create a Lead with status=Open.
+        # Patch enqueue so on_doc_event (fired by insert) cannot dispatch this
+        # doc to leftover published automations — that would create an
+        # Automation Run whose dynamic link blocks deletion in cleanup.
         uid = uuid.uuid4().hex[:8]
-        lead = frappe.get_doc({
-            "doctype": "Lead",
-            "lead_name": f"SameField Test Lead {uid}",
-            "status": "Open",
-            "email_id": f"samefield-{uid}@test.com",
-        })
-        lead.insert(ignore_permissions=True)
-        frappe.db.commit()
+        with patch("automation_builder.dispatcher.frappe.enqueue"):
+            lead = frappe.get_doc({
+                "doctype": "Lead",
+                "lead_name": f"SameField Test Lead {uid}",
+                "status": "Open",
+                "email_id": f"samefield-{uid}@test.com",
+            })
+            lead.insert(ignore_permissions=True)
+            frappe.db.commit()
 
         # Evaluate trigger conditions against the Lead
         result = _evaluate_trigger_conditions(self.auto_name, lead)
@@ -227,14 +231,15 @@ class TestSameFieldNameTwoTriggers(IntegrationTestCase):
         # OR semantics: ANY row matching is sufficient → TRUE.
         self.assertTrue(result)
 
-        # Create a ToDo with status=Open
-        todo = frappe.get_doc({
-            "doctype": "ToDo",
-            "description": "SameField Test ToDo",
-            "status": "Open",
-        })
-        todo.insert(ignore_permissions=True)
-        frappe.db.commit()
+        # Create a ToDo with status=Open (enqueue patched for same reason)
+        with patch("automation_builder.dispatcher.frappe.enqueue"):
+            todo = frappe.get_doc({
+                "doctype": "ToDo",
+                "description": "SameField Test ToDo",
+                "status": "Open",
+            })
+            todo.insert(ignore_permissions=True)
+            frappe.db.commit()
 
         # Evaluate trigger conditions against the ToDo
         result_todo = _evaluate_trigger_conditions(self.auto_name, todo)
@@ -243,9 +248,16 @@ class TestSameFieldNameTwoTriggers(IntegrationTestCase):
         # OR semantics: neither matches → FALSE.
         self.assertFalse(result_todo)
 
-        # Cleanup
-        lead.delete(ignore_permissions=True)
-        todo.delete(ignore_permissions=True)
+        # Cleanup: remove any Automation Run dynamic links first, then the docs
+        for dt, dn in (("Lead", lead.name), ("ToDo", todo.name)):
+            frappe.db.sql(
+                "DELETE FROM `tabAutomation Run` WHERE reference_doctype = %s AND reference_name = %s",
+                (dt, dn),
+            )
+            try:
+                frappe.delete_doc(dt, dn, force=True, ignore_permissions=True)
+            except Exception:
+                frappe.db.rollback()
         frappe.db.commit()
 
 

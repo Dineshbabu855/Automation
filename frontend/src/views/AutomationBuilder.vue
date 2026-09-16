@@ -322,7 +322,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { VueFlow, Handle, Position, useVueFlow } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
@@ -673,7 +673,8 @@ function onConnect(params) {
   // If the target already has an incoming edge on "-in", use "-in-left" instead.
   let targetHandle = params.targetHandle
   const existingIncoming = edges.value.find(e => e.target === params.target && e.targetHandle === targetHandle)
-  if (existingIncoming && targetHandle.endsWith('-in')) {
+  const wasAutoSwitched = existingIncoming && targetHandle.endsWith('-in')
+  if (wasAutoSwitched) {
     targetHandle = targetHandle.replace(/-in$/, '-in-left')
   }
 
@@ -687,6 +688,23 @@ function onConnect(params) {
     markerEnd: { type: 'arrowclosed', color: 'var(--gray-400)' },
   }
   edges.value.push(newEdge)
+
+  // Visual feedback for auto-handle-switching (convergence)
+  if (wasAutoSwitched) {
+    lastAutoSwitchedHandle.value = `${params.target}:${targetHandle}`
+    // Add highlight class to the handle element
+    nextTick(() => {
+      const handleEl = document.querySelector(`.vue-flow__handle[data-id="${targetHandle}"]`)
+      if (handleEl) {
+        handleEl.classList.add('ab-handle-auto-switched')
+        setTimeout(() => handleEl.classList.remove('ab-handle-auto-switched'), 800)
+      }
+    })
+    if (lastAutoSwitchedTimeout.value) clearTimeout(lastAutoSwitchedTimeout.value)
+    lastAutoSwitchedTimeout.value = setTimeout(() => {
+      lastAutoSwitchedHandle.value = null
+    }, 800)
+  }
 }
 
 /**
@@ -887,6 +905,10 @@ function onConnectEnd(event) {
 // Track which handle the connection drag started from
 const connectionStartNodeId = ref('')
 const connectionStartHandleId = ref('')
+
+// Track last auto-switched handle for visual feedback
+const lastAutoSwitchedHandle = ref(null)
+const lastAutoSwitchedTimeout = ref(null)
 
 function onConnectStart(params) {
   connectionStartNodeId.value = params.nodeId
@@ -1185,7 +1207,7 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 4px;
   padding: 2px;
-  background: var(--gray-100);
+  background: var(--control-bg);
   border-radius: 6px;
 }
 
@@ -1202,18 +1224,18 @@ onBeforeUnmount(() => {
 }
 
 .ab-status-btn:hover:not(:disabled) {
-  background: var(--gray-200);
+  background: var(--btn-ghost-hover-bg);
 }
 
 .ab-status-btn-active {
-  background: white;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  background: var(--card-bg);
+  box-shadow: var(--shadow-sm);
   color: var(--gray-900);
 }
 
 .ab-status-published .ab-status-btn-active {
   background: var(--green-500);
-  color: white;
+  color: var(--neutral);
 }
 
 .ab-status-btn:disabled {
@@ -1232,12 +1254,12 @@ onBeforeUnmount(() => {
   z-index: 1000;
 }
 .ab-modal {
-  background: white;
+  background: var(--card-bg);
   border-radius: 12px;
   padding: 24px;
   min-width: 420px;
   max-width: 560px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-lg);
 }
 .ab-modal h3 {
   margin: 0 0 16px;

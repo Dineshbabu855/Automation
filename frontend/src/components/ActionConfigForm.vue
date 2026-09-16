@@ -72,7 +72,17 @@
       <template v-else-if="field.type === 'field_mapping_table'">
         <div v-if="config[field.name] && config[field.name].length" class="ab-mapping-rows">
           <div v-for="(row, idx) in config[field.name]" :key="idx" class="ab-mapping-row">
+            <!-- For http_request headers, target_field is a free header name, not a doctype field -->
+            <input
+              v-if="isHttpRequestHeaders"
+              type="text"
+              class="ab-mapping-target"
+              :value="row.target_field"
+              placeholder="Header name (e.g. Content-Type)"
+              @input="updateMapping(field.name, idx, 'target_field', $event.target.value)"
+            />
             <select
+              v-else
               class="ab-mapping-target"
               :value="row.target_field"
               @change="updateMapping(field.name, idx, 'target_field', $event.target.value)"
@@ -93,6 +103,41 @@
           </div>
         </div>
         <button class="ab-btn ab-btn-ghost ab-btn-sm" @click="addMapping(field.name)">+ Add Field</button>
+      </template>
+
+      <!-- field_select: dropdown of fields from trigger doctype (for IF/Switch field_to_check) -->
+      <template v-else-if="field.type === 'field_select'">
+        <select
+          :value="config[field.name]"
+          @change="onFieldSelectChange(field.name, $event.target.value)"
+        >
+          <option value="">Select field</option>
+          <optgroup label="Document Fields">
+            <option v-for="f in realFields" :key="f.fieldname" :value="f.fieldname">
+              {{ f.label }} ({{ f.fieldname }})
+            </option>
+          </optgroup>
+          <optgroup v-if="hasTriggerDoctypePseudoField" label="Automation">
+            <option value="__trigger_doctype__">Triggering Doctype</option>
+          </optgroup>
+        </select>
+      </template>
+
+      <!-- case_list: repeatable case_value rows for Switch -->
+      <template v-else-if="field.type === 'case_list'">
+        <div v-if="config[field.name] && config[field.name].length" class="ab-mapping-rows">
+          <div v-for="(row, idx) in config[field.name]" :key="idx" class="ab-mapping-row">
+            <input
+              type="text"
+              class="ab-mapping-source"
+              :value="row.case_value"
+              placeholder="Match value"
+              @input="updateMapping(field.name, idx, 'case_value', $event.target.value)"
+            />
+            <button class="ab-btn ab-btn-ghost ab-btn-sm ab-mapping-remove" @click="removeMapping(field.name, idx)">✕</button>
+          </div>
+        </div>
+        <button class="ab-btn ab-btn-ghost ab-btn-sm" @click="addCase(field.name)">+ Add Case</button>
       </template>
 
       <!-- template_picker: dropdown of email templates -->
@@ -149,6 +194,17 @@ const effectiveTargetFields = computed(() => {
   return triggerFields.value
 })
 
+// For http_request headers, target_field is a free header name (not a doctype field)
+const isHttpRequestHeaders = computed(() => {
+  return props.config.action_type === 'http_request'
+})
+
+// For field_select (IF/Switch field_to_check), we need realFields + pseudo-field
+const realFields = computed(() => triggerFields.value.filter(f => f.fieldname !== '__trigger_doctype__'))
+const hasTriggerDoctypePseudoField = computed(() => {
+  return ['if_condition', 'switch_case'].includes(props.config.action_type)
+})
+
 function isFieldVisible(field) {
   if (!field.depends_on) return true
   const depValue = props.config[field.depends_on]
@@ -158,6 +214,10 @@ function isFieldVisible(field) {
   // trigger_doctype_select is only visible when there are multiple triggers
   if (field.type === 'trigger_doctype_select') {
     return props.triggerDoctypes.length > 1
+  }
+  // field_select and case_list are only for logic nodes
+  if (field.type === 'field_select' || field.type === 'case_list') {
+    return ['if_condition', 'switch_case'].includes(props.config.action_type)
   }
   return !!depValue
 }
@@ -210,6 +270,18 @@ function updateMapping(fieldName, idx, key, value) {
   const mappings = [...(props.config[fieldName] || [])]
   mappings[idx] = { ...mappings[idx], [key]: value }
   emit('update:config', { ...props.config, [fieldName]: mappings })
+}
+
+// field_select handler (for IF/Switch field_to_check)
+function onFieldSelectChange(fieldName, value) {
+  emit('update:config', { ...props.config, [fieldName]: value })
+}
+
+// case_list handlers (for Switch cases)
+function addCase(fieldName) {
+  const cases = [...(props.config[fieldName] || [])]
+  cases.push({ case_value: '' })
+  emit('update:config', { ...props.config, [fieldName]: cases })
 }
 
 // Core field loading function — called explicitly, not via watchEffect

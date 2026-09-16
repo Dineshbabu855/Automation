@@ -174,8 +174,6 @@ function onSelectChange(fieldName, value) {
     linkedTargetFields.value = []
   }
   emit('update:config', newConfig)
-  // Give parent time to update props, then reload fields
-  setTimeout(() => loadFields(), 100)
 }
 
 function onDoctypeChange(fieldName, value) {
@@ -189,13 +187,11 @@ function onDoctypeChange(fieldName, value) {
 function onTriggerDoctypeSelectChange(fieldName, value) {
   const newConfig = { ...props.config, [fieldName]: value }
   emit('update:config', newConfig)
-  setTimeout(() => loadFields(), 100)
 }
 
 function onLinkFieldnameChange(value) {
   const newConfig = { ...props.config, link_fieldname: value, field_mapping: [{ target_field: '', source_value: '' }] }
   emit('update:config', newConfig)
-  setTimeout(() => loadFields(), 100)
 }
 
 function addMapping(fieldName) {
@@ -229,8 +225,6 @@ async function loadFields() {
   const linkFieldname = props.config.link_fieldname
   const targetDoctype = props.config.target_doctype
 
-  console.log('[ACF] loadFields called', { triggerDt, actionType, target, linkFieldname, targetDoctype })
-
   if (actionType === 'update_field') {
     if (target === 'Linked Document' && linkFieldname && triggerDt) {
       try {
@@ -238,20 +232,16 @@ async function loadFields() {
         const lf = allFields.find(f => f.fieldname === linkFieldname)
         if (lf && lf.options) {
           linkedTargetFields.value = await getDoctypeFields(lf.options)
-          console.log('[ACF] Loaded linked fields:', linkedTargetFields.value.length)
         } else {
           linkedTargetFields.value = []
         }
       } catch (e) {
-        console.error('[ACF] Failed to load linked fields', e)
         linkedTargetFields.value = []
       }
     } else if (triggerDt) {
       try {
         triggerFields.value = await getDoctypeFields(triggerDt)
-        console.log('[ACF] Loaded trigger fields for Same Document:', triggerFields.value.length)
       } catch (e) {
-        console.error('[ACF] Failed to load trigger fields', e)
         triggerFields.value = []
       }
       linkedTargetFields.value = []
@@ -259,14 +249,12 @@ async function loadFields() {
   } else if (actionType === 'create_document' && targetDoctype) {
     try {
       triggerFields.value = await getDoctypeFields(targetDoctype)
-      console.log('[ACF] Loaded create_document target fields:', triggerFields.value.length)
     } catch (e) {
       triggerFields.value = []
     }
   } else if (triggerDt) {
     try {
       triggerFields.value = await getDoctypeFields(triggerDt)
-      console.log('[ACF] Loaded default trigger fields:', triggerFields.value.length)
     } catch (e) {
       triggerFields.value = []
     }
@@ -292,19 +280,20 @@ onMounted(async () => {
 // Watch triggerDoctype changes (e.g., user sets trigger doctype after adding action)
 watch(
   () => props.triggerDoctype,
-  (val) => {
-    console.log('[ACF] triggerDoctype changed:', val)
-    loadFields()
-  }
+  () => loadFields()
 )
 
-// Deep watch on config to catch any property changes
+// Reload fields only when a field-affecting key changes. A deep watch on
+// config would fire a network request on every keystroke in text inputs.
 watch(
-  () => props.config,
-  (val) => {
-    console.log('[ACF] config changed:', JSON.stringify(val))
-    loadFields()
-  },
-  { deep: true }
+  () => [
+    props.triggerDoctypes,
+    props.config.action_type,
+    props.config.target_doctype,
+    props.config.target,
+    props.config.link_fieldname,
+    props.config.trigger_doctype_select,
+  ],
+  () => loadFields()
 )
 </script>

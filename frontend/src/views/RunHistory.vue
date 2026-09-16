@@ -83,6 +83,15 @@ const STEP_LABELS = {
   create_document: 'Create Document',
   send_email: 'Send Email',
   update_field: 'Update Field',
+  http_request: 'HTTP Request',
+  telegram: 'Telegram',
+  if_condition: 'IF',
+  switch_case: 'Switch',
+  condition: 'Condition',
+  webhook: 'Webhook',
+  schedule: 'Schedule',
+  manual: 'Manual',
+  trigger: 'Trigger',
 }
 
 function stepLabel(stepType) {

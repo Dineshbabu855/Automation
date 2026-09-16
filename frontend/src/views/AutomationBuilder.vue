@@ -261,6 +261,8 @@
         :node-id="selectedNodeId"
         :trigger-doctype="selectedNodeTriggerDoctype"
         :trigger-doctypes="triggerDoctypes"
+        :automation-name="automationId"
+        :trigger-index="selectedTriggerIndex"
         @update="updateNodeData"
         @close="selectedNode = null"
         @add-action="addActionNode"
@@ -314,7 +316,6 @@
           <span v-else-if="runNowResult.output">{{ runNowResult.output }}</span>
         </div>
       </div>
-    </div>
 
     </div>
   </div>
@@ -500,6 +501,13 @@ const selectedNodeTriggerDoctype = computed(() => {
   return findUpstreamTriggerDoctype(selectedNodeId.value) || triggerDoctype.value
 })
 
+// Index of the selected node among canvas trigger nodes — matches the DB
+// trigger row order, since save() persists triggers in canvas order
+const selectedTriggerIndex = computed(() => {
+  const triggerNodes = nodes.value.filter(n => n.type === 'trigger')
+  return Math.max(triggerNodes.findIndex(n => n.id === selectedNodeId.value), 0)
+})
+
 const canPublish = ref(false)
 
 function publish() {
@@ -590,10 +598,6 @@ function toggleAddMenu(nodeId) {
   showAddMenu.value = showAddMenu.value === nodeId ? null : nodeId
 }
 
-function closeAddMenu() {
-  showAddMenu.value = null
-}
-
 // Run Now (Manual Trigger) functions
 function openRunNowModal() {
   const triggerNode = nodes.value.find(n => n.type === 'trigger' && n.data?.trigger_type === 'Manual')
@@ -647,6 +651,8 @@ function isValidConnection(params) {
   // Block connections to any trigger node (initial or dynamically created)
   const targetNode = nodes.value.find(n => n.id === target)
   if (targetNode && targetNode.type === 'trigger') return false
+  // Block connections to add-trigger node (it's a UI button, not a real node)
+  if (target === 'add-trigger') return false
   if (source === 'add-trigger') return false
 
   // Linear-only for non-trigger nodes: reject if source handle already has an outgoing edge
@@ -782,15 +788,20 @@ function createNodeAndConnect(nodeType, actionType, sourceNodeId, sourceHandleId
   }
 
   // If adding a trigger node from sidebar, connect it to the first action/condition node
+  // Alternate -in / -in-left to avoid overlapping with existing trigger edges
   if (nodeType === 'trigger' && !sourceNodeId) {
     const firstAction = nodes.value.find(n => n.type === 'action' || n.type === 'condition')
     if (firstAction) {
+      const existingEdges = edges.value.filter(e => e.target === firstAction.id)
+      const targetHandle = existingEdges.length % 2 === 0
+        ? `${firstAction.id}-in`
+        : `${firstAction.id}-in-left`
       edges.value.push({
         id: `e-${newNodeId}-${firstAction.id}`,
         source: newNodeId,
         target: firstAction.id,
         sourceHandle: `${newNodeId}-out`,
-        targetHandle: `${firstAction.id}-in`,
+        targetHandle,
         type: 'smoothstep',
         markerEnd: { type: 'arrowclosed', color: 'var(--gray-400)' },
       })
@@ -895,10 +906,6 @@ function onPickerSelect(item) {
   pickerVisible.value = false
 }
 
-function closePicker() {
-  pickerVisible.value = false
-}
-
 // Drag-and-drop from left sidebar palette
 function onDragOver(event) {
   event.preventDefault()
@@ -906,25 +913,17 @@ function onDragOver(event) {
 }
 
 function onDrop(event) {
-  console.log('[AB-DnD] onDrop fired', event)
   const data = event.dataTransfer.getData('application/automation-builder-node') || event.dataTransfer.getData('text/plain')
-  console.log('[AB-DnD] dataTransfer data:', data)
-  if (!data) {
-    console.log('[AB-DnD] No data in dataTransfer, returning')
-    return
-  }
+  if (!data) return
 
   try {
     const { nodeType, actionType } = JSON.parse(data)
-    console.log('[AB-DnD] Parsed:', { nodeType, actionType })
 
     // Use Vue Flow's screenToFlowCoordinate for proper coordinate conversion
     // that accounts for pan/zoom
     const flowPos = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
-    console.log('[AB-DnD] Flow position:', flowPos)
 
     const newNodePosition = createNodeAndConnect(nodeType, actionType, null, null, flowPos)
-    console.log('[AB-DnD] Node created successfully')
 
     // Center viewport on the new node so it's always visible (especially when zoomed in)
     if (setCenterFn && newNodePosition) {
@@ -1055,16 +1054,23 @@ onMounted(async () => {
           // (graph_definition JSON stores positions but conditions live in the DB triggers table)
           if (auto.triggers && auto.triggers.length) {
             const triggerNodes = nodes.value.filter(n => n.type === 'trigger')
-            // Match triggers by index — each graph trigger node maps to a DB trigger row
-            for (let i = 0; i < triggerNodes.length && i < auto.triggers.length; i++) {
+            for (let i = 0; i < auto.triggers.length; i++) {
               const t = auto.triggers[i]
-              triggerNodes[i].data.trigger_type = t.trigger_type || 'DocType Event'
-              triggerNodes[i].data.trigger_doctype = t.trigger_doctype || ''
-              triggerNodes[i].data.trigger_event = t.trigger_event || 'On Update'
-              triggerNodes[i].data.schedule_frequency = t.schedule_frequency || 'Hourly'
-              triggerNodes[i].data.webhook_token = t.webhook_token || ''
-              triggerNodes[i].data.condition_logic = t.condition_logic || 'All must match'
-              triggerNodes[i].data.conditions = t.conditions || []
+              // Match by graph_node_id (order-independent) when present,
+              // falling back to index for legacy rows
+              let targetNode = null
+              if (t.graph_node_id) {
+                targetNode = triggerNodes.find(n => n.id === t.graph_node_id)
+              }
+              if (!targetNode) targetNode = triggerNodes[i]
+              if (!targetNode) continue
+              targetNode.data.trigger_type = t.trigger_type || 'DocType Event'
+              targetNode.data.trigger_doctype = t.trigger_doctype || ''
+              targetNode.data.trigger_event = t.trigger_event || 'On Update'
+              targetNode.data.schedule_frequency = t.schedule_frequency || 'Hourly'
+              targetNode.data.webhook_token = t.webhook_token || ''
+              targetNode.data.condition_logic = t.condition_logic || 'All must match'
+              targetNode.data.conditions = t.conditions || []
             }
           }
 
@@ -1130,15 +1136,18 @@ onMounted(async () => {
           nodes.value = nodes.value.filter(n => n.id !== 'trigger')
           nodes.value.unshift(...triggerNodes)
           // Connect all triggers to the first action/condition node
+          // Alternate -in / -in-left to avoid overlapping edges
           const firstTarget = nodes.value.find(n => n.type === 'action' || n.type === 'condition')
           if (firstTarget) {
-            for (const tn of triggerNodes) {
+            for (let i = 0; i < triggerNodes.length; i++) {
+              const tn = triggerNodes[i]
+              const targetHandle = i % 2 === 0 ? `${firstTarget.id}-in` : `${firstTarget.id}-in-left`
               edges.value.push({
                 id: `e-${tn.id}-${firstTarget.id}`,
                 source: tn.id,
                 target: firstTarget.id,
                 sourceHandle: `${tn.id}-out`,
-                targetHandle: `${firstTarget.id}-in`,
+                targetHandle,
                 type: 'smoothstep',
                 markerEnd: { type: 'arrowclosed', color: 'var(--gray-500)' },
               })

@@ -564,6 +564,8 @@ def list_automations():
             "status",
             "enabled",
             "modified",
+            "trigger_doctype",
+            "trigger_event",
         ],
         order_by="modified desc",
     )

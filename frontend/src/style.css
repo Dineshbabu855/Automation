@@ -1,5 +1,20 @@
 /* Automation Builder - Frappe v16 Desk Native Styles */
 
+/* Missing Frappe-compatible vars — Frappe desk theme doesn't define these */
+:root {
+  --bg-color-gray-1: #fafafa;
+  --bg-color-gray-2: #f4f4f4;
+  --bg-color-gray-3: #eaeaea;
+  --text-link: #2563eb;
+}
+
+[data-theme="dark"] {
+  --bg-color-gray-1: #2a2a2a;
+  --bg-color-gray-2: #333;
+  --bg-color-gray-3: #3d3d3d;
+  --text-link: #6aa0f0;
+}
+
 /* === App Shell === */
 .ab-app {
   background: var(--bg-color);

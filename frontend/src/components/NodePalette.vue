@@ -36,9 +36,6 @@
         </span>
         <span class="ab-node-palette-label">{{ item.label }}</span>
       </div>
-
-      <!-- Frappe section -->
-      <div class="ab-node-palette-section">Frappe</div>
       <div
         class="ab-node-palette-item"
         draggable="true"
@@ -118,7 +115,6 @@ function onDragStart(event, item) {
   }
 
   const payload = JSON.stringify({ nodeType, actionType })
-  console.log('[AB-DnD] dragstart fired, setting data:', payload)
   event.dataTransfer.setData('application/automation-builder-node', payload)
   event.dataTransfer.effectAllowed = 'move'
   event.dataTransfer.setData('text/plain', payload)

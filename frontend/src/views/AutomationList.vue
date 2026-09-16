@@ -18,7 +18,7 @@
       <div v-for="auto in automations" :key="auto.name" class="ab-list-row" @click="openBuilder(auto.name)">
         <div class="ab-list-row-left">
           <div class="ab-list-row-subject">
-            <a href="#">{{ auto.automation_name }}</a>
+            <span class="ab-list-row-title">{{ auto.automation_name }}</span>
           </div>
           <div class="ab-list-row-meta">{{ auto.trigger_doctype }} → {{ auto.trigger_event }}</div>
           <div>
@@ -89,17 +89,13 @@ function openRuns(name) {
 
 async function toggleEnabled(auto) {
   try {
+    // Minimal payload — triggers and graph are preserved server-side when
+    // omitted; sending stale/undefined values would corrupt the automation
     await saveAutomation({
       name: auto.name,
       automation_name: auto.automation_name,
-      trigger_doctype: auto.trigger_doctype,
-      trigger_event: auto.trigger_event,
-      condition_field: auto.condition_field,
-      condition_operator: auto.condition_operator,
-      condition_value: auto.condition_value,
-      enabled: auto.enabled ? 0 : 1,
       status: auto.status,
-      graph_definition: auto.graph_definition,
+      enabled: auto.enabled ? 0 : 1,
     })
     auto.enabled = auto.enabled ? 0 : 1
     frappe.show_alert({

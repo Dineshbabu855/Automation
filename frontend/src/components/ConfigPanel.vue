@@ -50,24 +50,30 @@
         </select>
       </div>
       <!-- Webhook URL display -->
-      <div v-if="local.trigger_type === 'Webhook' && local.webhook_token" class="ab-config-group">
+      <div v-if="local.trigger_type === 'Webhook'" class="ab-config-group">
         <label>Webhook URL</label>
-        <div class="ab-webhook-url-row">
-          <input
-            type="text"
-            :value="webhookUrl"
-            readonly
-            class="ab-webhook-url-input"
-          />
-          <button class="ab-btn ab-btn-ghost ab-btn-sm" @click="copyWebhookUrl" title="Copy URL">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+        <template v-if="local.webhook_token">
+          <div class="ab-webhook-url-row">
+            <input
+              type="text"
+              :value="webhookUrl"
+              readonly
+              class="ab-webhook-url-input"
+            />
+            <button class="ab-btn ab-btn-ghost ab-btn-sm" @click="copyWebhookUrl" title="Copy URL">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+            </button>
+          </div>
+          <button class="ab-btn ab-btn-ghost ab-btn-sm ab-webhook-regen" @click="confirmRegenerateToken">
+            Regenerate Token
           </button>
-        </div>
-        <button class="ab-btn ab-btn-ghost ab-btn-sm ab-webhook-regen" @click="confirmRegenerateToken">
-          Regenerate Token
-        </button>
-        <p class="ab-config-hint ab-webhook-warning">
-          Regenerating will immediately invalidate the old URL.
+          <p class="ab-config-hint ab-webhook-warning">
+            Regenerating will immediately invalidate the old URL.
+          </p>
+        </template>
+        <p v-else class="ab-config-hint">
+          A webhook token is generated when you save this automation.
+          Save first — the URL and copy button will appear here.
         </p>
       </div>
     </template>
@@ -119,7 +125,7 @@
       </div>
       <div v-if="!isUnaryOperator(local.condition_operator)" class="ab-config-group">
         <label>Value</label>
-        <input type="text" v-model="local.condition_value" placeholder="e.g. Qualified" />
+        <input type="text" v-model="local.condition_value" :placeholder="valuePlaceholder(local.condition_operator)" />
       </div>
     </template>
 
@@ -164,12 +170,13 @@
       </div>
       <div v-if="!isUnaryOperator(local.operator)" class="ab-config-group">
         <label>Value</label>
-        <input type="text" v-model="local.value" placeholder="e.g. Qualified" />
-        <p class="ab-config-hint">Supports {{triggerDoctype}} tokens</p>
+        <input type="text" v-model="local.value" :placeholder="valuePlaceholder(local.operator)" />
+        <p class="ab-config-hint">Values support tokens like <code>{{trigger.fieldname}}</code> or <code>{{__trigger_doctype__}}</code>.</p>
       </div>
-      <div class="ab-config-hint ab-config-if-hint">
+<div class="ab-config-hint ab-config-if-hint">
         Routes to <strong>True</strong> branch if condition matches, <strong>False</strong> otherwise.
         Connect each handle to a different action.
+        <br>Values support tokens like <code>{{trigger.fieldname}}</code> or <code>{{__trigger_doctype__}}</code>.
       </div>
     </template>
 
@@ -259,6 +266,8 @@ const props = defineProps({
   nodeId: String,
   triggerDoctype: String,
   triggerDoctypes: { type: Array, default: () => [] },
+  automationName: { type: String, default: '' },
+  triggerIndex: { type: Number, default: 0 },
 })
 
 const emit = defineEmits(['update', 'close', 'add-action', 'remove-action'])
@@ -316,8 +325,8 @@ async function confirmRegenerateToken() {
   try {
     const { regenerateWebhookToken } = await import('../composables/api.js')
     const result = await regenerateWebhookToken({
-      automation_name: props.nodeId?.startsWith('trigger') ? '' : props.nodeId,
-      trigger_index: 0,
+      automation_name: props.automationName,
+      trigger_index: props.triggerIndex,
     })
     if (result?.token) {
       local.value.webhook_token = result.token

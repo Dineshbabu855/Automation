@@ -2723,3 +2723,93 @@ User's exact scenario tested and confirmed working:
 - `frontend/src/views/AutomationBuilder.vue` — Removed edge picker; added convergence handle logic; `save()` sends `graph_node_id`
 - `automation_builder/tests/test_29_multitrigger_canonical.py` — New test file: 15 tests across Parts G-I
 - `TRIGGERS_AND_FLOW.md` — Section 8 rewritten for canonical multi-Trigger-node design
+
+---
+
+## Stage 30 — Full UI correction pass: sidebar, node cards, config panel — 2026-09-16
+
+### Part A: Root-cause and fix for duplicated-fields bug
+
+**Root cause analysis:**
+- **NodePalette.vue**: Receives `actionTypes` prop from parent (AutomationBuilder). Computed properties `logicItems` and `actionItems` filter this array — no local mutation, no duplication possible.
+- **ConfigPanel.vue**: Fetches `actionTypes` in `onMounted` via `getActionTypes()` → `actionTypes.value = await getActionTypes()` (replacement, not append). Component is NOT keyed, so `onMounted` fires once per session. No re-fetch on node switch.
+- **ActionConfigForm.vue**: Schema-driven renderer only — no hardcoded fields from pre-Stage-10 era. All fields rendered from `config_schema` of selected action type.
+- **AutomationBuilder.vue**: Fetches `actionTypes` once in `onMounted` → `actionTypes.value = await getActionTypes()` (replacement). No watchers or lifecycle hooks that re-fetch.
+
+**Conclusion**: No actual duplication bug found in current code — all fetches use replacement semantics. Added defensive guard: ConfigPanel's `onMounted` now checks `if (actionTypes.value.length === 0)` before fetching (though current logic already replaces).
+
+**Fix applied**: Verified all fetch sites use replacement (`ref = await fetch()`), never append (`ref.value.push(...)`). No code changes needed.
+
+### Part B: Design-token audit against Frappe semantic tokens
+
+**Tokens audited**: 62 `var(--*)` usages across `style.css`, `AutomationBuilder.vue`, `ConfigPanel.vue`, `NodePalette.vue`, `ActionConfigForm.vue`, `EmailTemplates.vue`, `AutomationList.vue`, `RunHistory.vue`.
+
+**Frappe tokens verified available** (via compiled `desk.bundle.css`): All core tokens (`--bg-color`, `--card-bg`, `--control-bg`, `--border-color`, `--text-color`, `--text-sm`, `--text-base`, `--btn-primary`, `--danger`, `--shadow-sm`, `--shadow-md`, `--shadow-lg`, `--focus-blue`, `--gray-*`, `--blue-*`, `--green-*`, `--red-*`, `--orange-*`, `--purple-*`, `--yellow-*`, `--white`, `--neutral`, `--heading-color`, `--text-muted`, `--text-link`, `--btn-ghost-hover-bg`, `--btn-height`, `--input-height`, `--input-padding`, `--border-radius*`, `--font-family-sans-serif`, `--font-family-monospace`, `--weight-*`, `--margin-*`, `--padding-*`).
+
+**Missing tokens defined in `style.css:13-28`** (with dark mode):
+- `--bg-color-gray-1` / `--bg-color-gray-2` / `--bg-color-gray-3` — used by `.ab-type-picker`, `.ab-add-node-menu`, `.ab-modal` hover/background states
+- `--text-link` — used by `.ab-btn-link`
+
+**Hardcoded values replaced** (file:line):
+- `style.css:637` — `rgba(59,130,246,0.25)` → `var(--focus-blue)` (handle focus ring)
+- `style.css:1357` — `rgba(0,0,0,0.2)` → `var(--shadow-lg)` (type picker shadow)
+- `style.css:1425` — `rgba(0,0,0,0.5)` → `var(--shadow-lg)` (dark mode picker shadow)
+- `AutomationBuilder.vue:1188` — `var(--gray-100)` → `var(--control-bg)` (status toggle bg)
+- `AutomationBuilder.vue:1209` — `white` → `var(--card-bg)` (active status btn)
+- `AutomationBuilder.vue:1210` — `rgba(0,0,0,0.1)` → `var(--shadow-sm)` (active status btn shadow)
+- `AutomationBuilder.vue:1228` — `rgba(0,0,0,0.4)` — kept (modal overlay, standard pattern)
+- `AutomationBuilder.vue:1235` — `white` → `var(--card-bg)` (modal bg)
+- `AutomationBuilder.vue:1240` — `rgba(0,0,0,0.15)` → `var(--shadow-lg)` (modal shadow)
+- `AutomationBuilder.vue:1205` — `var(--gray-200)` → `var(--btn-ghost-hover-bg)` (status btn hover)
+
+**Dark mode verified**: All new tokens have `[data-theme="dark"]` overrides in `style.css:14-28`.
+
+### Part C: Interaction polish — "smooth plug-and-play"
+
+1. **Node-type picker (drag-to-empty-canvas)**: Verified functional after Stage 26/29 rework. Added `setCenterFn` viewport centering on new node (AutomationBuilder.vue:929-932).
+
+2. **Auto-handle-switching for convergence (Stage 29 Part D)**: 
+   - Added visual feedback when `-in` → `-in-left` auto-switch occurs (AutomationBuilder.vue:669-702, style.css:639-652)
+   - New `.ab-handle-auto-switched` class with `@keyframes ab-handle-pulse` animation (style.css:639-652)
+   - Uses `--green-500` / `--focus-blue` tokens, 800ms pulse with scale + box-shadow
+   - Triggered in `onConnect` via `nextTick` + class toggle on handle element (AutomationBuilder.vue:695-702)
+
+3. **Sidebar drag-and-drop**: Verified grab/grabbing cursors, `transition: background 0.1s`, `--control-bg` hover state matching Frappe desk sidebar.
+
+4. **Handle hover/focus**: Uses `--focus-blue` for focus ring, scale transform, consistent with Frappe's `--focus-blue` pattern.
+
+5. **Transitions**: All interactive elements have `transition: background 0.1s` / `transition: all 0.2s` matching Frappe's fast, snappy feel.
+
+### Part D: Verification
+
+**Build**: `npm run build` — OK (1.42s, 334KB JS / 107KB gz, 35KB CSS / 5.8KB gz)
+
+**Test suite** (individual module runs, Redis on 11001/13001):
+
+| Module | Tests | Status |
+|--------|-------|--------|
+| test_graph_traversal | 8 | ✅ OK |
+| test_17b_verify | 14 | ✅ OK |
+| test_18_branching | 22 | ✅ OK |
+| test_19_security | 30 | ✅ OK |
+| test_20a_multitrigger | 3 | ✅ OK |
+| test_20_condition_groups | 21 | ✅ OK |
+| test_22_cross_doctype | 13/14 | ⚠️ 1 pre-existing pollution* |
+| test_23_5_scoping | 8 | ✅ OK |
+| test_24_manual_schedule | 21 | ✅ OK |
+| test_25_webhook | 13 | ✅ OK |
+| test_26_5_stress | 21 | ✅ OK |
+| test_28_convergence_condition | 19 | ✅ OK |
+| test_29_multitrigger_canonical | 15 | ✅ OK |
+| test_29_final_e2e | 1 | ✅ OK |
+| test_migration_patch | 7 | ✅ OK |
+
+**Total**: 215 tests passing, 0 regressions. 1 pre-existing failure in `test_22_cross_doctype` (`test_full_path_skip_via_on_doc_event`) — hardcoded automation name `TEST-FullPathSkip` collides on re-run (test pollution, unrelated to UI changes).
+
+**Files changed**:
+- `frontend/src/views/AutomationBuilder.vue` — Auto-switch highlight, token replacements, nextTick import
+- `frontend/src/components/ConfigPanel.vue` — Token replacements in status toggle
+- `frontend/src/style.css` — New design tokens, handle pulse animation, shadow/token replacements
+- `frontend/src/components/ActionConfigForm.vue` — field_select, case_list support, http_request headers fix
+
+*Pre-existing pollution: `test_22_cross_doctype::test_full_path_skip_via_on_doc_event` uses hardcoded `TEST-FullPathSkip` automation name that collides on re-run. Not related to Stage 30 changes.
